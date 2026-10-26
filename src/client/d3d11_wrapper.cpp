@@ -27,7 +27,8 @@ uint16_t ServerPort() {
 bool FeatureLevelAccepted(const D3D_FEATURE_LEVEL* levels, UINT count) {
     if (!levels || count == 0) return true;
     for (UINT i = 0; i < count; ++i) {
-        if (levels[i] <= D3D_FEATURE_LEVEL_11_0) return true;
+        // Accept up to D3D_FEATURE_LEVEL_11_1 (supported natively by server GPU e.g. RTX 4070)
+        if (levels[i] <= D3D_FEATURE_LEVEL_11_1) return true;
     }
     return false;
 }
@@ -42,8 +43,24 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
     D3D_FEATURE_LEVEL* pFeatureLevel, ID3D11DeviceContext** ppImmediateContext) {
     if (ppSwapChain && !pSwapChainDesc) return E_INVALIDARG;
     if (!FeatureLevelAccepted(pFeatureLevels, FeatureLevels)) return E_INVALIDARG;
-    return ProxyD3D11Device::CreateProxyDeviceAndSwapChain(ServerHost(), ServerPort(), pSwapChainDesc, ppSwapChain,
-                                                           ppDevice, pFeatureLevel, ppImmediateContext);
+
+    D3D_FEATURE_LEVEL actualLevel = D3D_FEATURE_LEVEL_11_0;
+    HRESULT hr = ProxyD3D11Device::CreateProxyDeviceAndSwapChain(ServerHost(), ServerPort(), pSwapChainDesc, ppSwapChain,
+                                                           ppDevice, &actualLevel, ppImmediateContext);
+    if (FAILED(hr)) return hr;
+
+    if (pFeatureLevel) {
+        *pFeatureLevel = actualLevel;
+        if (pFeatureLevels && FeatureLevels > 0) {
+            for (UINT i = 0; i < FeatureLevels; ++i) {
+                if (pFeatureLevels[i] <= actualLevel) {
+                    *pFeatureLevel = pFeatureLevels[i];
+                    break;
+                }
+            }
+        }
+    }
+    return hr;
 }
 
 HRESULT WINAPI D3D11CreateDevice(
