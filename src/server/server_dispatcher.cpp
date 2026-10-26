@@ -3,8 +3,24 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 namespace RemoteGPU {
+
+namespace {
+
+inline bool IsValidDxgiFormat(uint32_t format) {
+    return (format >= 1 && format <= 191);
+}
+
+inline bool IsValidD3D11PrimitiveTopology(uint32_t topology) {
+    return (topology == D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) ||
+           (topology >= D3D11_PRIMITIVE_TOPOLOGY_POINTLIST && topology <= D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP) ||
+           (topology >= D3D11_PRIMITIVE_TOPOLOGY_LINELIST_ADJ && topology <= D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ) ||
+           (topology >= D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST && topology <= D3D11_PRIMITIVE_TOPOLOGY_32_CONTROL_POINT_PATCHLIST);
+}
+
+} // anonymous namespace
 
 // =============================================================================
 // ServerResourceManager Implementation
@@ -275,6 +291,49 @@ bool ServerDispatcher::HandleCreateBuffer(const PacketHeader& /*header*/, const 
     }
 
     const auto* p = reinterpret_cast<const CreateBufferPayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateBuffer: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    // Direct3D 11 buffer requirements
+    constexpr uint32_t MAX_BUFFER_BYTES = 2048u * 1024u * 1024u; // 2 GB D3D11 limit
+    if (p->byte_width == 0 || p->byte_width > MAX_BUFFER_BYTES) {
+        std::cerr << "[ServerDispatcher] CreateBuffer: invalid byte_width: " << p->byte_width << std::endl;
+        return false;
+    }
+
+    // Validate Usage enum (0: DEFAULT, 1: IMMUTABLE, 2: DYNAMIC, 3: STAGING)
+    if (p->usage > D3D11_USAGE_STAGING) {
+        std::cerr << "[ServerDispatcher] CreateBuffer: invalid usage: " << p->usage << std::endl;
+        return false;
+    }
+
+    // Constant buffer specific alignment and size rules
+    if (p->bind_flags & D3D11_BIND_CONSTANT_BUFFER) {
+        if ((p->byte_width % 16) != 0 || p->byte_width > D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16) {
+            std::cerr << "[ServerDispatcher] CreateBuffer: constant buffer byte_width must be 16-byte aligned and <= 65536, got "
+                      << p->byte_width << std::endl;
+            return false;
+        }
+    }
+
+    // Initial data bounds validation
+    if (p->has_initial_data && p->initial_data_size > 0) {
+        if (p->initial_data_size < p->byte_width) {
+            std::cerr << "[ServerDispatcher] CreateBuffer: initial_data_size (" << p->initial_data_size 
+                      << ") < byte_width (" << p->byte_width << ")" << std::endl;
+            return false;
+        }
+        if (p->initial_data_size > size - sizeof(CreateBufferPayload)) {
+            std::cerr << "[ServerDispatcher] CreateBuffer payload missing initial data" << std::endl;
+            return false;
+        }
+    } else if (p->usage == D3D11_USAGE_IMMUTABLE) {
+        std::cerr << "[ServerDispatcher] CreateBuffer: IMMUTABLE buffer requires initial data" << std::endl;
+        return false;
+    }
+
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
@@ -290,10 +349,6 @@ bool ServerDispatcher::HandleCreateBuffer(const PacketHeader& /*header*/, const 
     HRESULT hr = S_OK;
 
     if (p->has_initial_data && p->initial_data_size > 0) {
-        if (size < sizeof(CreateBufferPayload) + p->initial_data_size) {
-            std::cerr << "[ServerDispatcher] CreateBuffer payload missing initial data" << std::endl;
-            return false;
-        }
         D3D11_SUBRESOURCE_DATA init_data = {};
         init_data.pSysMem = payload + sizeof(CreateBufferPayload);
         hr = device->CreateBuffer(&desc, &init_data, &buffer);
@@ -318,6 +373,48 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
     }
 
     const auto* p = reinterpret_cast<const CreateTexture2DPayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    // Direct3D 11 Texture2D architectural limits
+    if (p->width == 0 || p->width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        p->height == 0 || p->height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: invalid dimensions " << p->width << "x" << p->height << std::endl;
+        return false;
+    }
+
+    if (p->array_size == 0 || p->array_size > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: invalid array_size: " << p->array_size << std::endl;
+        return false;
+    }
+
+    if (p->mips > D3D11_REQ_MIP_LEVELS) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: invalid mips: " << p->mips << std::endl;
+        return false;
+    }
+
+    if (p->format == DXGI_FORMAT_UNKNOWN || !IsValidDxgiFormat(p->format)) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: invalid format: " << p->format << std::endl;
+        return false;
+    }
+
+    if (p->usage > D3D11_USAGE_STAGING) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: invalid usage: " << p->usage << std::endl;
+        return false;
+    }
+
+    if (p->has_initial_data && p->initial_data_size > 0) {
+        if (p->initial_data_size > size - sizeof(CreateTexture2DPayload)) {
+            std::cerr << "[ServerDispatcher] CreateTexture2D payload missing initial data" << std::endl;
+            return false;
+        }
+    } else if (p->usage == D3D11_USAGE_IMMUTABLE) {
+        std::cerr << "[ServerDispatcher] CreateTexture2D: IMMUTABLE texture requires initial data" << std::endl;
+        return false;
+    }
+
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
@@ -338,10 +435,6 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
     HRESULT hr = S_OK;
 
     if (p->has_initial_data && p->initial_data_size > 0) {
-        if (size < sizeof(CreateTexture2DPayload) + p->initial_data_size) {
-            std::cerr << "[ServerDispatcher] CreateTexture2D payload missing initial data" << std::endl;
-            return false;
-        }
         D3D11_SUBRESOURCE_DATA init_data = {};
         init_data.pSysMem = payload + sizeof(CreateTexture2DPayload);
         init_data.SysMemPitch = p->sys_mem_pitch;
@@ -368,6 +461,24 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
     }
 
     const auto* p = reinterpret_cast<const CreateSrvPayload*>(payload);
+    if (p->res_id == 0 || p->resource_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateSrv: invalid res_id or resource_id (res_id=" 
+                  << p->res_id << ", resource_id=" << p->resource_id << ")" << std::endl;
+        return false;
+    }
+
+    bool use_desc = (p->format != 0 || p->view_dimension != 0);
+    if (use_desc) {
+        if (p->format != 0 && !IsValidDxgiFormat(p->format)) {
+            std::cerr << "[ServerDispatcher] CreateSrv: invalid format: " << p->format << std::endl;
+            return false;
+        }
+        if (p->view_dimension > D3D11_SRV_DIMENSION_BUFFEREX) {
+            std::cerr << "[ServerDispatcher] CreateSrv: invalid view_dimension: " << p->view_dimension << std::endl;
+            return false;
+        }
+    }
+
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
@@ -378,7 +489,6 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
     }
 
     D3D11_SHADER_RESOURCE_VIEW_DESC desc = {};
-    bool use_desc = (p->format != 0 || p->view_dimension != 0);
     if (use_desc) {
         desc.Format = static_cast<DXGI_FORMAT>(p->format);
         desc.ViewDimension = static_cast<D3D11_SRV_DIMENSION>(p->view_dimension);
@@ -407,6 +517,23 @@ bool ServerDispatcher::HandleCreateRtv(const PacketHeader& /*header*/, const uin
     }
 
     const auto* p = reinterpret_cast<const CreateRtvPayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateRtv: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    bool use_desc = (p->format != 0);
+    if (use_desc) {
+        if (!IsValidDxgiFormat(p->format)) {
+            std::cerr << "[ServerDispatcher] CreateRtv: invalid format: " << p->format << std::endl;
+            return false;
+        }
+        if (p->view_dimension > D3D11_RTV_DIMENSION_TEXTURE3D) {
+            std::cerr << "[ServerDispatcher] CreateRtv: invalid view_dimension: " << p->view_dimension << std::endl;
+            return false;
+        }
+    }
+
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
@@ -436,7 +563,6 @@ bool ServerDispatcher::HandleCreateRtv(const PacketHeader& /*header*/, const uin
         }
 
         D3D11_RENDER_TARGET_VIEW_DESC desc = {};
-        bool use_desc = (p->format != 0);
         if (use_desc) {
             desc.Format = static_cast<DXGI_FORMAT>(p->format);
             desc.ViewDimension = static_cast<D3D11_RTV_DIMENSION>(p->view_dimension);
@@ -462,6 +588,23 @@ bool ServerDispatcher::HandleCreateDsv(const PacketHeader& /*header*/, const uin
     }
 
     const auto* p = reinterpret_cast<const CreateDsvPayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateDsv: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    bool use_desc = (p->format != 0);
+    if (use_desc) {
+        if (!IsValidDxgiFormat(p->format)) {
+            std::cerr << "[ServerDispatcher] CreateDsv: invalid format: " << p->format << std::endl;
+            return false;
+        }
+        if (p->view_dimension > D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY) {
+            std::cerr << "[ServerDispatcher] CreateDsv: invalid view_dimension: " << p->view_dimension << std::endl;
+            return false;
+        }
+    }
+
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
@@ -490,7 +633,6 @@ bool ServerDispatcher::HandleCreateDsv(const PacketHeader& /*header*/, const uin
         }
 
         D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
-        bool use_desc = (p->format != 0);
         if (use_desc) {
             desc.Format = static_cast<DXGI_FORMAT>(p->format);
             desc.ViewDimension = static_cast<D3D11_DSV_DIMENSION>(p->view_dimension);
@@ -517,7 +659,17 @@ bool ServerDispatcher::HandleCreateVertexShader(const PacketHeader& /*header*/, 
     }
 
     const auto* p = reinterpret_cast<const CreateShaderPayload*>(payload);
-    if (size < sizeof(CreateShaderPayload) + p->bytecode_length) {
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateVertexShader: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    if (p->bytecode_length == 0 || p->bytecode_length > 64 * 1024 * 1024) {
+        std::cerr << "[ServerDispatcher] CreateVertexShader: invalid bytecode_length: " << p->bytecode_length << std::endl;
+        return false;
+    }
+
+    if (p->bytecode_length > size - sizeof(CreateShaderPayload)) {
         std::cerr << "[ServerDispatcher] CreateVertexShader bytecode truncated" << std::endl;
         return false;
     }
@@ -545,7 +697,17 @@ bool ServerDispatcher::HandleCreatePixelShader(const PacketHeader& /*header*/, c
     }
 
     const auto* p = reinterpret_cast<const CreateShaderPayload*>(payload);
-    if (size < sizeof(CreateShaderPayload) + p->bytecode_length) {
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreatePixelShader: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    if (p->bytecode_length == 0 || p->bytecode_length > 64 * 1024 * 1024) {
+        std::cerr << "[ServerDispatcher] CreatePixelShader: invalid bytecode_length: " << p->bytecode_length << std::endl;
+        return false;
+    }
+
+    if (p->bytecode_length > size - sizeof(CreateShaderPayload)) {
         std::cerr << "[ServerDispatcher] CreatePixelShader bytecode truncated" << std::endl;
         return false;
     }
@@ -573,11 +735,25 @@ bool ServerDispatcher::HandleCreateInputLayout(const PacketHeader& /*header*/, c
     }
 
     const auto* p = reinterpret_cast<const CreateInputLayoutPayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateInputLayout: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    // Direct3D 11 architecture enforces a maximum of 32 input elements
+    if (p->num_elements > D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT) {
+        std::cerr << "[ServerDispatcher] CreateInputLayout: num_elements (" << p->num_elements 
+                  << ") exceeds D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT (" 
+                  << D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT << ")" << std::endl;
+        return false;
+    }
+
     size_t elements_size = static_cast<size_t>(p->num_elements) * sizeof(RgpuInputElementDesc);
-    size_t expected_total = sizeof(CreateInputLayoutPayload) + elements_size + p->bytecode_length;
+    size_t expected_total = sizeof(CreateInputLayoutPayload) + elements_size + static_cast<size_t>(p->bytecode_length);
 
     if (size < expected_total) {
-        std::cerr << "[ServerDispatcher] CreateInputLayout payload truncated" << std::endl;
+        std::cerr << "[ServerDispatcher] CreateInputLayout payload truncated (expected at least " 
+                  << expected_total << ", got " << size << ")" << std::endl;
         return false;
     }
 
@@ -589,19 +765,55 @@ bool ServerDispatcher::HandleCreateInputLayout(const PacketHeader& /*header*/, c
     std::vector<std::string> semantic_names(p->num_elements);
 
     for (uint32_t i = 0; i < p->num_elements; ++i) {
-        semantic_names[i] = src_elements[i].semantic_name;
+        // Safe bounded string copy: prevent buffer over-read if semantic name is not null-terminated
+        size_t name_len = strnlen(src_elements[i].semantic_name, sizeof(src_elements[i].semantic_name));
+        if (name_len == 0) {
+            std::cerr << "[ServerDispatcher] CreateInputLayout: empty semantic name at element " << i << std::endl;
+            return false;
+        }
+        semantic_names[i].assign(src_elements[i].semantic_name, name_len);
         d3d_elements[i].SemanticName = semantic_names[i].c_str();
+
         d3d_elements[i].SemanticIndex = src_elements[i].semantic_index;
+
+        // Format enum validation
+        if (src_elements[i].format == DXGI_FORMAT_UNKNOWN || !IsValidDxgiFormat(src_elements[i].format)) {
+            std::cerr << "[ServerDispatcher] CreateInputLayout: invalid format " << src_elements[i].format 
+                      << " at element " << i << std::endl;
+            return false;
+        }
         d3d_elements[i].Format = static_cast<DXGI_FORMAT>(src_elements[i].format);
+
+        // Vertex buffer input slot validation (< 32)
+        if (src_elements[i].input_slot >= D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT) {
+            std::cerr << "[ServerDispatcher] CreateInputLayout: input_slot " << src_elements[i].input_slot 
+                      << " exceeds D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT at element " << i << std::endl;
+            return false;
+        }
         d3d_elements[i].InputSlot = src_elements[i].input_slot;
+
         d3d_elements[i].AlignedByteOffset = src_elements[i].aligned_byte_offset;
+
+        // Input classification validation (0: PER_VERTEX_DATA, 1: PER_INSTANCE_DATA)
+        if (src_elements[i].input_slot_class > D3D11_INPUT_PER_INSTANCE_DATA) {
+            std::cerr << "[ServerDispatcher] CreateInputLayout: invalid input_slot_class " 
+                      << src_elements[i].input_slot_class << " at element " << i << std::endl;
+            return false;
+        }
         d3d_elements[i].InputSlotClass = static_cast<D3D11_INPUT_CLASSIFICATION>(src_elements[i].input_slot_class);
         d3d_elements[i].InstanceDataStepRate = src_elements[i].instance_data_step;
     }
 
+    // Direct3D 11 requires non-empty shader bytecode with input signature to create layout
+    if (p->bytecode_length == 0) {
+        std::cerr << "[ServerDispatcher] CreateInputLayout: bytecode_length is 0" << std::endl;
+        return false;
+    }
+
     const void* bytecode = payload + sizeof(CreateInputLayoutPayload) + elements_size;
     Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;
-    HRESULT hr = device->CreateInputLayout(d3d_elements.data(), p->num_elements, bytecode, p->bytecode_length, &layout);
+    const D3D11_INPUT_ELEMENT_DESC* p_descs = (p->num_elements > 0) ? d3d_elements.data() : nullptr;
+    HRESULT hr = device->CreateInputLayout(p_descs, p->num_elements, bytecode, p->bytecode_length, &layout);
     if (FAILED(hr)) {
         std::cerr << "[ServerDispatcher] CreateInputLayout failed: 0x" << std::hex << hr << std::dec
                   << " (res_id=" << p->res_id << ")" << std::endl;
@@ -619,6 +831,26 @@ bool ServerDispatcher::HandleCreateSampler(const PacketHeader& /*header*/, const
     }
 
     const auto* p = reinterpret_cast<const CreateSamplerPayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateSampler: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    // Direct3D 11 texture address modes: 1 (WRAP) to 5 (MIRROR_ONCE)
+    if (p->address_u < 1 || p->address_u > 5 ||
+        p->address_v < 1 || p->address_v > 5 ||
+        p->address_w < 1 || p->address_w > 5) {
+        std::cerr << "[ServerDispatcher] CreateSampler: invalid address mode (u=" 
+                  << p->address_u << ", v=" << p->address_v << ", w=" << p->address_w << ")" << std::endl;
+        return false;
+    }
+
+    // Direct3D 11 comparison functions: 0 (default to NEVER), 1 (NEVER) to 8 (ALWAYS)
+    if (p->comparison_func > 8) {
+        std::cerr << "[ServerDispatcher] CreateSampler: invalid comparison_func: " << p->comparison_func << std::endl;
+        return false;
+    }
+
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
@@ -628,8 +860,8 @@ bool ServerDispatcher::HandleCreateSampler(const PacketHeader& /*header*/, const
     desc.AddressV = static_cast<D3D11_TEXTURE_ADDRESS_MODE>(p->address_v);
     desc.AddressW = static_cast<D3D11_TEXTURE_ADDRESS_MODE>(p->address_w);
     desc.MipLODBias = p->mip_lod_bias;
-    desc.MaxAnisotropy = p->max_anisotropy;
-    desc.ComparisonFunc = static_cast<D3D11_COMPARISON_FUNC>(p->comparison_func);
+    desc.MaxAnisotropy = (std::min)(p->max_anisotropy, 16u);
+    desc.ComparisonFunc = (p->comparison_func == 0) ? D3D11_COMPARISON_NEVER : static_cast<D3D11_COMPARISON_FUNC>(p->comparison_func);
     std::memcpy(desc.BorderColor, p->border_color, sizeof(desc.BorderColor));
     desc.MinLOD = p->min_lod;
     desc.MaxLOD = p->max_lod;
@@ -676,6 +908,12 @@ bool ServerDispatcher::HandleIASetVertexBuffer(const PacketHeader& /*header*/, c
     if (size < sizeof(IASetVertexBufferPayload)) return false;
     const auto* p = reinterpret_cast<const IASetVertexBufferPayload*>(payload);
 
+    if (p->slot >= D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid vertex buffer slot: " << p->slot 
+                  << " (limit: " << D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT << ")" << std::endl;
+        return false;
+    }
+
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
 
@@ -692,6 +930,13 @@ bool ServerDispatcher::HandleIASetIndexBuffer(const PacketHeader& /*header*/, co
     if (size < sizeof(IASetIndexBufferPayload)) return false;
     const auto* p = reinterpret_cast<const IASetIndexBufferPayload*>(payload);
 
+    if (p->format != DXGI_FORMAT_R16_UINT && 
+        p->format != DXGI_FORMAT_R32_UINT && 
+        p->format != DXGI_FORMAT_UNKNOWN) {
+        std::cerr << "[ServerDispatcher] Invalid index buffer format: " << p->format << std::endl;
+        return false;
+    }
+
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
 
@@ -703,6 +948,11 @@ bool ServerDispatcher::HandleIASetIndexBuffer(const PacketHeader& /*header*/, co
 bool ServerDispatcher::HandleIASetTopology(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
     if (size < sizeof(IASetTopologyPayload)) return false;
     const auto* p = reinterpret_cast<const IASetTopologyPayload*>(payload);
+
+    if (!IsValidD3D11PrimitiveTopology(p->topology)) {
+        std::cerr << "[ServerDispatcher] Invalid primitive topology: " << p->topology << std::endl;
+        return false;
+    }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
@@ -726,6 +976,12 @@ bool ServerDispatcher::HandleVSSetShader(const PacketHeader& /*header*/, const u
 bool ServerDispatcher::HandleVSSetCB(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
     if (size < sizeof(VSSetConstantBufferPayload)) return false;
     const auto* p = reinterpret_cast<const VSSetConstantBufferPayload*>(payload);
+
+    if (p->slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid VS constant buffer slot: " << p->slot 
+                  << " (limit: " << D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT << ")" << std::endl;
+        return false;
+    }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
@@ -752,6 +1008,12 @@ bool ServerDispatcher::HandlePSSetCB(const PacketHeader& /*header*/, const uint8
     if (size < sizeof(PSSetConstantBufferPayload)) return false;
     const auto* p = reinterpret_cast<const PSSetConstantBufferPayload*>(payload);
 
+    if (p->slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid PS constant buffer slot: " << p->slot 
+                  << " (limit: " << D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT << ")" << std::endl;
+        return false;
+    }
+
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
 
@@ -764,6 +1026,12 @@ bool ServerDispatcher::HandlePSSetCB(const PacketHeader& /*header*/, const uint8
 bool ServerDispatcher::HandlePSSetSrv(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
     if (size < sizeof(PSSetSrvPayload)) return false;
     const auto* p = reinterpret_cast<const PSSetSrvPayload*>(payload);
+
+    if (p->slot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid PS SRV slot: " << p->slot 
+                  << " (limit: " << D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT << ")" << std::endl;
+        return false;
+    }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
@@ -778,6 +1046,12 @@ bool ServerDispatcher::HandlePSSetSampler(const PacketHeader& /*header*/, const 
     if (size < sizeof(PSSetSamplerPayload)) return false;
     const auto* p = reinterpret_cast<const PSSetSamplerPayload*>(payload);
 
+    if (p->slot >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid PS sampler slot: " << p->slot 
+                  << " (limit: " << D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT << ")" << std::endl;
+        return false;
+    }
+
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
 
@@ -790,6 +1064,30 @@ bool ServerDispatcher::HandlePSSetSampler(const PacketHeader& /*header*/, const 
 bool ServerDispatcher::HandleRSSetViewport(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
     if (size < sizeof(RSSetViewportPayload)) return false;
     const auto* p = reinterpret_cast<const RSSetViewportPayload*>(payload);
+
+    UINT num_viewports = static_cast<UINT>(size / sizeof(RSSetViewportPayload));
+    if (num_viewports > D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) { // 16
+        std::cerr << "[ServerDispatcher] Viewport count exceeds limit: " << num_viewports << std::endl;
+        return false;
+    }
+
+    // Validate floating point sanity
+    if (!std::isfinite(p->width) || !std::isfinite(p->height) ||
+        !std::isfinite(p->top_left_x) || !std::isfinite(p->top_left_y) ||
+        !std::isfinite(p->min_depth) || !std::isfinite(p->max_depth)) {
+        std::cerr << "[ServerDispatcher] Viewport contains non-finite float values" << std::endl;
+        return false;
+    }
+
+    if (p->width < 0.0f || p->height < 0.0f || p->width > 32767.0f || p->height > 32767.0f) {
+        std::cerr << "[ServerDispatcher] Viewport dimensions out of bounds: " << p->width << "x" << p->height << std::endl;
+        return false;
+    }
+
+    if (p->min_depth < 0.0f || p->max_depth > 1.0f || p->min_depth > p->max_depth) {
+        std::cerr << "[ServerDispatcher] Viewport depth range invalid: [" << p->min_depth << ".." << p->max_depth << "]" << std::endl;
+        return false;
+    }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
@@ -831,7 +1129,13 @@ bool ServerDispatcher::HandleOMSetRenderTargets(const PacketHeader& /*header*/, 
     }
 
     ID3D11RenderTargetView* p_rtv = rtv.Get();
-    context->OMSetRenderTargets(p_rtv ? 1 : 0, p_rtv ? &p_rtv : nullptr, dsv.Get());
+    UINT num_rtvs = p_rtv ? 1 : 0;
+    if (num_rtvs > D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) {
+        std::cerr << "[ServerDispatcher] Render target count exceeds limit: " << num_rtvs << std::endl;
+        return false;
+    }
+
+    context->OMSetRenderTargets(num_rtvs, p_rtv ? &p_rtv : nullptr, dsv.Get());
     return true;
 }
 
@@ -843,9 +1147,20 @@ bool ServerDispatcher::HandleUpdateSubresource(const PacketHeader& /*header*/, c
     if (size < sizeof(UpdateSubresourcePayload)) return false;
     const auto* p = reinterpret_cast<const UpdateSubresourcePayload*>(payload);
 
+    if (p->res_id == 0) return false;
+
     if (size < sizeof(UpdateSubresourcePayload) + p->data_size) {
         std::cerr << "[ServerDispatcher] UpdateSubresource data truncated" << std::endl;
         return false;
+    }
+
+    if (p->has_dst_box) {
+        if (p->dst_box.right <= p->dst_box.left ||
+            p->dst_box.bottom <= p->dst_box.top ||
+            p->dst_box.back <= p->dst_box.front) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource invalid dst_box" << std::endl;
+            return false;
+        }
     }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
@@ -878,6 +1193,8 @@ bool ServerDispatcher::HandleWriteBufferDiscard(const PacketHeader& /*header*/, 
     if (size < sizeof(WriteBufferDiscardPayload)) return false;
     const auto* p = reinterpret_cast<const WriteBufferDiscardPayload*>(payload);
 
+    if (p->res_id == 0) return false;
+
     if (size < sizeof(WriteBufferDiscardPayload) + p->byte_width) {
         std::cerr << "[ServerDispatcher] WriteBufferDiscard data truncated" << std::endl;
         return false;
@@ -898,6 +1215,12 @@ bool ServerDispatcher::HandleWriteBufferDiscard(const PacketHeader& /*header*/, 
     D3D11_BUFFER_DESC desc = {};
     buf->GetDesc(&desc);
 
+    if (static_cast<uint64_t>(p->byte_offset) + static_cast<uint64_t>(p->byte_width) > desc.ByteWidth) {
+        std::cerr << "[ServerDispatcher] WriteBufferDiscard: write range exceeds buffer byte width ("
+                  << (p->byte_offset + p->byte_width) << " > " << desc.ByteWidth << ")" << std::endl;
+        return false;
+    }
+
     if ((desc.Usage == D3D11_USAGE_DYNAMIC) && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_WRITE)) {
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         HRESULT hr = context->Map(buf.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -916,6 +1239,13 @@ bool ServerDispatcher::HandleWriteBufferDiscard(const PacketHeader& /*header*/, 
 bool ServerDispatcher::HandleClearRtv(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
     if (size < sizeof(ClearRtvPayload)) return false;
     const auto* p = reinterpret_cast<const ClearRtvPayload*>(payload);
+
+    for (int i = 0; i < 4; ++i) {
+        if (!std::isfinite(p->color[i])) {
+            std::cerr << "[ServerDispatcher] ClearRtv non-finite color component " << i << std::endl;
+            return false;
+        }
+    }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
@@ -939,6 +1269,16 @@ bool ServerDispatcher::HandleClearRtv(const PacketHeader& /*header*/, const uint
 bool ServerDispatcher::HandleClearDsv(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
     if (size < sizeof(ClearDsvPayload)) return false;
     const auto* p = reinterpret_cast<const ClearDsvPayload*>(payload);
+
+    const UINT valid_mask = D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL;
+    if (p->clear_flags == 0 || (p->clear_flags & ~valid_mask) != 0) {
+        std::cerr << "[ServerDispatcher] ClearDsv invalid clear_flags: " << p->clear_flags << std::endl;
+        return false;
+    }
+    if (!std::isfinite(p->depth) || p->depth < 0.0f || p->depth > 1.0f) {
+        std::cerr << "[ServerDispatcher] ClearDsv invalid depth: " << p->depth << std::endl;
+        return false;
+    }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
