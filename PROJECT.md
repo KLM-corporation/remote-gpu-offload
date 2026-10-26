@@ -155,6 +155,19 @@ enum RgpuOpcode : uint16_t {
 - `FRAME_MODE_KEY` (first frame of a session or after a size change) predicts each pixel from its left neighbour; `FRAME_MODE_DELTA` from the previous frame. Both sides keep the last frame the client holds, whether it was sent compressed or raw.
 - Measured on the sample cube (60 frames, 640x480): 70.3 MB rendered, 1.7 MB sent (2.4%). 1280x720 over 200 frames: 703 MB -> 11.3 MB (1.6%). Codec cost at 1080p: about 2 ms encode, 1 ms decode.
 
+### 1c. LAN Validation (2026-10-26)
+Server: desktop with NVIDIA GeForce RTX 4070, wired Ethernet. Client: Lenovo laptop (Intel UHD 620, not used for rendering), Wi-Fi Intel AC 9560 (866 Mb/s link). Sample cube, 300 frames per run, two runs per row, `RGPU_SERVER=192.168.1.17`.
+
+| Resolution | Compression | FPS | Received per frame | Wi-Fi throughput |
+|---|---|---|---|---|
+| 640x480 | off | 41 | 1203 KB | ~400 Mb/s |
+| 640x480 | on | 135 | 28 KB | ~31 Mb/s |
+| 1280x720 | off | 16 | 3606 KB | ~480 Mb/s |
+| 1280x720 | on | 91 | 60 KB | ~45 Mb/s |
+
+- Two-machine LAN operation (acceptance criterion) verified; the captured frame passes `verify_pixels.py` and is byte-identical with and without compression.
+- Without compression the Wi-Fi link is saturated. With compression bandwidth is no longer the limit: the 1:1 Present round trip (one frame in flight) is, which frame pipelining would address.
+
 ### 2. Transport Contract (`src/common/transport.h`)
 ```cpp
 class NetworkSocket {
