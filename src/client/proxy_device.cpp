@@ -2,6 +2,7 @@
 #include "proxy_context.h"
 #include "proxy_swapchain.h"
 #include "proxy_dxgi.h"
+#include "dxgi_format_info.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -226,10 +227,34 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture2D(const D3D11_TEXTURE2
     if (!ppTexture2D) return S_FALSE;
     if (m_deviceRemoved) return DXGI_ERROR_DEVICE_REMOVED;
 
-    const uint32_t id = AllocateResourceId();
+    // Initial data covers every subresource (mip levels x array slices). Each one is copied with
+    // exactly the bytes Direct3D would read: row_pitch * (rows - 1) + row_bytes.
     const bool has_data = pInitialData && pInitialData->pSysMem;
-    const uint32_t data_size = has_data ? pInitialData->SysMemPitch * pDesc->Height : 0;
+    std::vector<RgpuSubresourceData> table;
+    std::vector<uint8_t> blob;
+    if (has_data) {
+        const uint32_t mip_levels = pDesc->MipLevels ? pDesc->MipLevels : FullMipCount(pDesc->Width, pDesc->Height);
+        const size_t count = static_cast<size_t>(mip_levels) * pDesc->ArraySize;
+        table.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t mip = static_cast<uint32_t>(i % mip_levels);
+            uint64_t row_bytes = 0;
+            uint32_t rows = 0;
+            if (!SurfaceLayout(pDesc->Format, MipSize(pDesc->Width, mip), MipSize(pDesc->Height, mip), row_bytes, rows)) {
+                std::cerr << "[RemoteGPU] CreateTexture2D: initial data not supported for format " << pDesc->Format << std::endl;
+                return E_NOTIMPL;
+            }
+            const D3D11_SUBRESOURCE_DATA& src = pInitialData[i];
+            if (!src.pSysMem || src.SysMemPitch < row_bytes) return E_INVALIDARG;
+            const uint64_t bytes = static_cast<uint64_t>(src.SysMemPitch) * (rows - 1) + row_bytes;
+            if (blob.size() + bytes > 0xFFFFFFFFull) return E_OUTOFMEMORY;
+            table[i] = {src.SysMemPitch, src.SysMemSlicePitch, static_cast<uint32_t>(blob.size()), static_cast<uint32_t>(bytes)};
+            const auto* first = static_cast<const uint8_t*>(src.pSysMem);
+            blob.insert(blob.end(), first, first + bytes);
+        }
+    }
 
+    const uint32_t id = AllocateResourceId();
     CreateTexture2DPayload p = {};
     p.res_id = id;
     p.width = pDesc->Width;
@@ -243,12 +268,21 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture2D(const D3D11_TEXTURE2
     p.bind_flags = pDesc->BindFlags;
     p.cpu_access_flags = pDesc->CPUAccessFlags;
     p.misc_flags = pDesc->MiscFlags;
-    p.has_initial_data = has_data ? 1 : 0;
+    p.has_initial_data = has_data ? TEXTURE_INITIAL_DATA_SUBRESOURCES : TEXTURE_INITIAL_DATA_NONE;
     p.sys_mem_pitch = has_data ? pInitialData->SysMemPitch : 0;
     p.sys_mem_slice_pitch = has_data ? pInitialData->SysMemSlicePitch : 0;
-    p.initial_data_size = data_size;
+    p.initial_data_size = static_cast<uint32_t>(blob.size());
 
-    if (!SendWithBlob(this, OP_CREATE_TEXTURE2D, &p, sizeof(p), has_data ? pInitialData->pSysMem : nullptr, data_size))
+    // Layout: payload, [uint32 count, RgpuSubresourceData[count], blob]
+    std::vector<uint8_t> extra;
+    if (has_data) {
+        const uint32_t count = static_cast<uint32_t>(table.size());
+        extra.resize(sizeof(count) + table.size() * sizeof(RgpuSubresourceData) + blob.size());
+        std::memcpy(extra.data(), &count, sizeof(count));
+        std::memcpy(extra.data() + sizeof(count), table.data(), table.size() * sizeof(RgpuSubresourceData));
+        std::memcpy(extra.data() + sizeof(count) + table.size() * sizeof(RgpuSubresourceData), blob.data(), blob.size());
+    }
+    if (!SendWithBlob(this, OP_CREATE_TEXTURE2D, &p, sizeof(p), extra.data(), extra.size()))
         return DXGI_ERROR_DEVICE_REMOVED;
 
     *ppTexture2D = new ProxyTexture2D(id, *pDesc, this);
@@ -265,12 +299,17 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateShaderResourceView(ID3D11Resou
     CreateSrvPayload p = {};
     p.res_id = id;
     p.resource_id = GetResourceIdFromCOM(pResource);
+    // No description: format and dimension 0 let the host derive the full view from the resource
+    // (a 2D array gets a TEXTURE2DARRAY view, not slice 0 only).
     p.format = pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN;
-    p.view_dimension = pDesc ? pDesc->ViewDimension : D3D11_SRV_DIMENSION_TEXTURE2D;
+    p.view_dimension = pDesc ? pDesc->ViewDimension : D3D11_SRV_DIMENSION_UNKNOWN;
     p.most_detailed_mip = pDesc ? pDesc->Texture2D.MostDetailedMip : 0;
     p.mip_levels = pDesc ? pDesc->Texture2D.MipLevels : 0xFFFFFFFFu;
 
-    if (!SendCommand(OP_CREATE_SRV, &p, sizeof(p), FLAG_ONEWAY)) return DXGI_ERROR_DEVICE_REMOVED;
+    // Array range trailer, read through the union shared by 2D array, cube and cube array views.
+    CreateSrvArrayRange range = {0, 1};
+    if (pDesc) range = {pDesc->Texture2DArray.FirstArraySlice, pDesc->Texture2DArray.ArraySize};
+    if (!SendWithBlob(this, OP_CREATE_SRV, &p, sizeof(p), &range, sizeof(range))) return DXGI_ERROR_DEVICE_REMOVED;
     *ppSRView = new ProxyShaderResourceView(id, pResource, pDesc, this);
     return S_OK;
 }

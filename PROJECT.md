@@ -174,7 +174,8 @@ Server: desktop with NVIDIA GeForce RTX 4070, wired Ethernet. Client: Lenovo lap
 - `OP_RESIZE_BUFFERS` (0x0072, `ResizeBuffersPayload {width, height}`) recreates the host back buffer; sent when a swap chain is created at a size other than the handshake size and on `ResizeBuffers`. As in D3D11, views on the old back buffer must be recreated.
 - A factory created before any device (`CreateDXGIFactory*`) opens one short probe session to learn the remote adapter name and VRAM.
 - Fixed-function states are forwarded: `OP_CREATE_BLEND_STATE` (0x001A), `OP_CREATE_DEPTH_STENCIL_STATE` (0x001B), `OP_CREATE_RASTERIZER_STATE` (0x001C), `OP_OM_SET_BLEND_STATE` (0x003C, with blend factor and sample mask), `OP_OM_SET_DEPTH_STENCIL_STATE` (0x003D, with stencil ref), `OP_RS_SET_STATE` (0x003E), `OP_RS_SET_SCISSOR` (0x003F, first rectangle). Res_id 0 binds the D3D11 default state. The client normalises fields D3D11 ignores (render targets 1-7 without independent blending, disabled blend/stencil) and the server validates every enum. `tests/test_render_states.cpp` checks culling, front-face winding, wireframe, scissor, alpha blending, depth on/off and stencil + colour write mask on the rendered pixels.
-- Not forwarded yet: texture mip chains and arrays in `CreateTexture2D` initial data, VS/GS/HS/DS/CS resources beyond constant buffers, instanced draws, multiple render targets, `ID3D11Device1`.
+- Texture subresources: `CreateTexture2D` initial data carries every subresource (mip levels x array slices) as `has_initial_data = TEXTURE_INITIAL_DATA_SUBRESOURCES` (2): `uint32 count`, `RgpuSubresourceData[count]` {row_pitch, slice_pitch, offset, size}, then the data. `src/common/dxgi_format_info.h` gives client and server the exact bytes Direct3D reads per subresource (BC formats in 4x4 blocks); the server rejects any entry, legacy single entry or `UpdateSubresource` (pitch, box, subresource index) that would make the driver read past the received packet. SRVs created without a description let the host derive the view (2D arrays, cubes); explicit array/cube views send their slice range in an optional `CreateSrvArrayRange` trailer. Covered by `tests/test_textures.cpp` (pixel checks) and `Test_ServerDispatcher_TextureDataBounds` in `tests/test_server.cpp`.
+- Not forwarded yet: buffer/1D/3D/multisampled views, VS/GS/HS/DS/CS resources beyond constant buffers, instanced draws, multiple render targets, `ID3D11Device1`.
 
 ### 2. Transport Contract (`src/common/transport.h`)
 ```cpp
@@ -215,6 +216,7 @@ remote_gpu_offload/
 ├── CMakeLists.txt
 ├── src/
 │   ├── common/
+│   │   ├── dxgi_format_info.h    # Bytes per row/rows per DXGI format (shared)
 │   │   ├── protocol.h            # Packet header, opcodes, structs
 │   │   ├── transport.h           # Winsock TCP socket wrapper
 │   │   ├── frame_codec.h/.cpp    # Lossless RLE/delta frame compression

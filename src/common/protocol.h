@@ -183,6 +183,22 @@ struct CreateTexture2DPayload {
     uint32_t initial_data_size;   // Byte count of initial pixel data
 };
 
+// CreateTexture2DPayload::has_initial_data values.
+enum RgpuTextureInitialData : uint32_t {
+    TEXTURE_INITIAL_DATA_NONE         = 0,
+    TEXTURE_INITIAL_DATA_SINGLE       = 1, // Legacy: one subresource (sys_mem_pitch/slice_pitch), data follows
+    TEXTURE_INITIAL_DATA_SUBRESOURCES = 2  // uint32 count, RgpuSubresourceData[count], then the data blob
+};
+
+// One entry per subresource (index = mip + array_slice * mip_levels), describing where its bytes
+// sit in the blob that follows the table. initial_data_size is the blob size.
+struct RgpuSubresourceData {
+    uint32_t row_pitch;
+    uint32_t slice_pitch;
+    uint32_t offset;              // From the start of the blob
+    uint32_t size;                // row_pitch * (rows - 1) + row_bytes for this mip level
+};
+
 struct CreateSrvPayload {
     uint32_t res_id;              // Monotonic ID for this SRV
     uint32_t resource_id;         // Underlying texture/buffer res_id
@@ -190,6 +206,13 @@ struct CreateSrvPayload {
     uint32_t view_dimension;      // D3D11_SRV_DIMENSION (4 = D3D11_SRV_DIMENSION_TEXTURE2D)
     uint32_t most_detailed_mip;   // Most detailed mip slice
     uint32_t mip_levels;          // Number of mip levels (0xFFFFFFFF for all)
+};
+
+// Optional trailer after CreateSrvPayload (older clients omit it): the array range for
+// TEXTURE2DARRAY (first slice, slice count) and TEXTURECUBEARRAY (first face, cube count).
+struct CreateSrvArrayRange {
+    uint32_t first_array_slice;
+    uint32_t array_size;
 };
 
 struct CreateRtvPayload {
@@ -498,7 +521,9 @@ static_assert(sizeof(ShutdownPayload) == 4);
 
 static_assert(sizeof(CreateBufferPayload) == 36);
 static_assert(sizeof(CreateTexture2DPayload) == 64);
+static_assert(sizeof(RgpuSubresourceData) == 16);
 static_assert(sizeof(CreateSrvPayload) == 24);
+static_assert(sizeof(CreateSrvArrayRange) == 8);
 static_assert(sizeof(CreateRtvPayload) == 20);
 static_assert(sizeof(CreateDsvPayload) == 24);
 static_assert(sizeof(CreateShaderPayload) == 8);

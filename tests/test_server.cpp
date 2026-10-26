@@ -616,6 +616,109 @@ static void Test_ServerDispatcher_DynamicBufferDiscard_And_Lifecycle() {
 }
 
 // ----------------------------------------------------------------------------
+// Test Suite 5: Texture data bounds (zero-trust). Direct3D reads initial and update
+// data by pitch and box without knowing how many bytes arrived; every case below would
+// otherwise make the driver read past the packet.
+// ----------------------------------------------------------------------------
+static void Test_ServerDispatcher_TextureDataBounds() {
+    HostGpuDevice gpu;
+    TEST_ASSERT(gpu.InitializeDedicatedGpu());
+    ServerDispatcher dispatcher(gpu);
+    PacketHeader h = {RGPU_MAGIC, OP_CREATE_TEXTURE2D, FLAG_NONE, 1, 0};
+
+    auto texture = [](uint32_t id, uint32_t mips, uint32_t mode, uint32_t pitch, uint32_t data_size) {
+        CreateTexture2DPayload p = {};
+        p.res_id = id;
+        p.width = p.height = 64;
+        p.mips = mips;
+        p.array_size = 1;
+        p.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        p.sample_count = 1;
+        p.usage = D3D11_USAGE_DEFAULT;
+        p.bind_flags = D3D11_BIND_SHADER_RESOURCE;
+        p.has_initial_data = mode;
+        p.sys_mem_pitch = pitch;
+        p.initial_data_size = data_size;
+        return p;
+    };
+    auto withTable = [](const CreateTexture2DPayload& p, uint32_t declared, std::vector<RgpuSubresourceData> table,
+                        size_t blob_size) {
+        std::vector<uint8_t> buf(sizeof(p) + 4 + table.size() * sizeof(RgpuSubresourceData) + blob_size, 0x5A);
+        std::memcpy(buf.data(), &p, sizeof(p));
+        std::memcpy(buf.data() + sizeof(p), &declared, 4);
+        std::memcpy(buf.data() + sizeof(p) + 4, table.data(), table.size() * sizeof(RgpuSubresourceData));
+        return buf;
+    };
+
+    // Legacy single subresource: a 256-byte pitch over 64 rows needs 16384 bytes, only 16 sent.
+    {
+        CreateTexture2DPayload p = texture(701, 1, TEXTURE_INITIAL_DATA_SINGLE, 256, 16);
+        std::vector<uint8_t> buf(sizeof(p) + 16, 0);
+        std::memcpy(buf.data(), &p, sizeof(p));
+        TEST_ASSERT_MSG(!dispatcher.DispatchCommand(h, buf.data(), buf.size()), "single subresource shorter than pitch*rows rejected");
+    }
+    // Legacy single entry for a 7-level texture: D3D would read 6 more descriptors.
+    {
+        CreateTexture2DPayload p = texture(702, 7, TEXTURE_INITIAL_DATA_SINGLE, 256, 16384);
+        std::vector<uint8_t> buf(sizeof(p) + 16384, 0);
+        std::memcpy(buf.data(), &p, sizeof(p));
+        TEST_ASSERT_MSG(!dispatcher.DispatchCommand(h, buf.data(), buf.size()), "single entry for a mip chain rejected");
+    }
+    // Table declaring the wrong subresource count.
+    {
+        CreateTexture2DPayload p = texture(703, 2, TEXTURE_INITIAL_DATA_SUBRESOURCES, 0, 16384 + 4096);
+        auto buf = withTable(p, 1, {{256, 0, 0, 16384}}, 16384 + 4096);
+        TEST_ASSERT_MSG(!dispatcher.DispatchCommand(h, buf.data(), buf.size()), "subresource count mismatch rejected");
+    }
+    // Entry pointing past the blob.
+    {
+        CreateTexture2DPayload p = texture(704, 2, TEXTURE_INITIAL_DATA_SUBRESOURCES, 0, 16384 + 4096);
+        auto buf = withTable(p, 2, {{256, 0, 0, 16384}, {128, 0, 16384 + 64, 4096}}, 16384 + 4096);
+        TEST_ASSERT_MSG(!dispatcher.DispatchCommand(h, buf.data(), buf.size()), "subresource beyond the blob rejected");
+    }
+    // Row pitch smaller than a row of pixels.
+    {
+        CreateTexture2DPayload p = texture(705, 1, TEXTURE_INITIAL_DATA_SUBRESOURCES, 0, 16384);
+        auto buf = withTable(p, 1, {{64, 0, 0, 16384}}, 16384);
+        TEST_ASSERT_MSG(!dispatcher.DispatchCommand(h, buf.data(), buf.size()), "row pitch below row size rejected");
+    }
+    // Blob shorter than initial_data_size claims.
+    {
+        CreateTexture2DPayload p = texture(706, 1, TEXTURE_INITIAL_DATA_SUBRESOURCES, 0, 16384);
+        auto buf = withTable(p, 1, {{256, 0, 0, 16384}}, 100);
+        TEST_ASSERT_MSG(!dispatcher.DispatchCommand(h, buf.data(), buf.size()), "truncated blob rejected");
+    }
+    // Valid two-level texture is accepted.
+    {
+        CreateTexture2DPayload p = texture(707, 2, TEXTURE_INITIAL_DATA_SUBRESOURCES, 0, 16384 + 4096);
+        auto buf = withTable(p, 2, {{256, 0, 0, 16384}, {128, 0, 16384, 4096}}, 16384 + 4096);
+        TEST_ASSERT_MSG(dispatcher.DispatchCommand(h, buf.data(), buf.size()), "valid 2-level texture accepted");
+        TEST_ASSERT(dispatcher.GetResourceManager().HasResource(707));
+    }
+
+    // UpdateSubresource on texture 707 (64x64 level 0, 32x32 level 1).
+    PacketHeader uh = {RGPU_MAGIC, OP_UPDATE_SUBRESOURCE, FLAG_NONE, 2, 0};
+    auto update = [&](uint32_t sub, bool box, RgpuBox b, uint32_t pitch, uint32_t data_size, size_t sent) {
+        UpdateSubresourcePayload u = {};
+        u.res_id = 707;
+        u.subresource = sub;
+        u.has_dst_box = box ? 1 : 0;
+        u.dst_box = b;
+        u.row_pitch = pitch;
+        u.data_size = data_size;
+        std::vector<uint8_t> buf(sizeof(u) + sent, 0x33);
+        std::memcpy(buf.data(), &u, sizeof(u));
+        return dispatcher.DispatchCommand(uh, buf.data(), buf.size());
+    };
+    TEST_ASSERT_MSG(!update(0, false, {}, 256, 16, 16), "update smaller than the subresource rejected");
+    TEST_ASSERT_MSG(!update(1, false, {}, 256, 16, 16), "update of level 1 smaller than 32 rows rejected");
+    TEST_ASSERT_MSG(!update(2, false, {}, 128, 4096, 4096), "update of a missing subresource rejected");
+    TEST_ASSERT_MSG(!update(1, true, {0, 0, 0, 33, 8, 1}, 256, 4096, 4096), "box wider than level 1 rejected");
+    TEST_ASSERT_MSG(update(1, true, {8, 8, 0, 16, 16, 1}, 32, 32 * 7 + 32, 32 * 7 + 32), "exact 8x8 box update accepted");
+    TEST_ASSERT_MSG(update(0, false, {}, 256, 16384, 16384), "full level 0 update accepted");
+}
+
+// ----------------------------------------------------------------------------
 // Test Main Entrypoint
 // ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
@@ -637,6 +740,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST_SUITE(Test_RowPitchPacking_OddDimensions);
     RUN_TEST_SUITE(Test_ServerDispatcher_LoopbackSyntheticPackets);
     RUN_TEST_SUITE(Test_ServerDispatcher_DynamicBufferDiscard_And_Lifecycle);
+    RUN_TEST_SUITE(Test_ServerDispatcher_TextureDataBounds);
 
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();

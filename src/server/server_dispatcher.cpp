@@ -1,4 +1,5 @@
 #include "server_dispatcher.h"
+#include "dxgi_format_info.h"
 #include "frame_codec.h"
 
 #include <iostream>
@@ -428,10 +429,71 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
         return false;
     }
 
-    if (p->has_initial_data && p->initial_data_size > 0) {
-        if (p->initial_data_size > size - sizeof(CreateTexture2DPayload)) {
+    // Initial data: one D3D11_SUBRESOURCE_DATA per subresource (mip levels x array slices). Each
+    // entry is checked against the exact byte count Direct3D will read, so a client can never make
+    // the driver read past the received packet.
+    std::vector<D3D11_SUBRESOURCE_DATA> init_data;
+    if (p->has_initial_data != TEXTURE_INITIAL_DATA_NONE) {
+        const uint32_t mip_levels = p->mips ? p->mips : FullMipCount(p->width, p->height);
+        if (mip_levels > FullMipCount(p->width, p->height)) {
+            std::cerr << "[ServerDispatcher] CreateTexture2D: " << mip_levels << " mips exceed the full chain" << std::endl;
+            return false;
+        }
+        const size_t count = static_cast<size_t>(mip_levels) * p->array_size;
+
+        std::vector<RgpuSubresourceData> table;
+        const uint8_t* blob = nullptr;
+        if (p->has_initial_data == TEXTURE_INITIAL_DATA_SINGLE) {
+            if (count != 1) {
+                std::cerr << "[ServerDispatcher] CreateTexture2D: single initial-data entry for " << count
+                          << " subresources" << std::endl;
+                return false;
+            }
+            table.push_back({p->sys_mem_pitch, p->sys_mem_slice_pitch, 0, p->initial_data_size});
+            blob = payload + sizeof(CreateTexture2DPayload);
+        } else if (p->has_initial_data == TEXTURE_INITIAL_DATA_SUBRESOURCES) {
+            const size_t header_end = sizeof(CreateTexture2DPayload) + sizeof(uint32_t);
+            if (size < header_end) return false;
+            uint32_t declared = 0;
+            std::memcpy(&declared, payload + sizeof(CreateTexture2DPayload), sizeof(declared));
+            if (declared != count || size - header_end < count * sizeof(RgpuSubresourceData)) {
+                std::cerr << "[ServerDispatcher] CreateTexture2D: subresource table mismatch (declared " << declared
+                          << ", expected " << count << ")" << std::endl;
+                return false;
+            }
+            table.resize(count);
+            std::memcpy(table.data(), payload + header_end, count * sizeof(RgpuSubresourceData));
+            blob = payload + header_end + count * sizeof(RgpuSubresourceData);
+        } else {
+            std::cerr << "[ServerDispatcher] CreateTexture2D: invalid has_initial_data " << p->has_initial_data << std::endl;
+            return false;
+        }
+
+        const size_t blob_available = size - static_cast<size_t>(blob - payload);
+        if (p->initial_data_size > blob_available) {
             std::cerr << "[ServerDispatcher] CreateTexture2D payload missing initial data" << std::endl;
             return false;
+        }
+        init_data.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t mip = static_cast<uint32_t>(i % mip_levels);
+            uint64_t row_bytes = 0;
+            uint32_t rows = 0;
+            if (!SurfaceLayout(p->format, MipSize(p->width, mip), MipSize(p->height, mip), row_bytes, rows)) {
+                std::cerr << "[ServerDispatcher] CreateTexture2D: initial data unsupported for format " << p->format << std::endl;
+                return false;
+            }
+            const RgpuSubresourceData& s = table[i];
+            const uint64_t needed = static_cast<uint64_t>(s.row_pitch) * (rows - 1) + row_bytes;
+            if (s.row_pitch < row_bytes || s.size < needed ||
+                static_cast<uint64_t>(s.offset) + s.size > p->initial_data_size) {
+                std::cerr << "[ServerDispatcher] CreateTexture2D: subresource " << i << " data out of bounds (pitch "
+                          << s.row_pitch << ", size " << s.size << ", needs " << needed << ")" << std::endl;
+                return false;
+            }
+            init_data[i].pSysMem = blob + s.offset;
+            init_data[i].SysMemPitch = s.row_pitch;
+            init_data[i].SysMemSlicePitch = s.slice_pitch;
         }
     } else if (p->usage == D3D11_USAGE_IMMUTABLE) {
         std::cerr << "[ServerDispatcher] CreateTexture2D: IMMUTABLE texture requires initial data" << std::endl;
@@ -457,15 +519,7 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     HRESULT hr = S_OK;
 
-    if (p->has_initial_data && p->initial_data_size > 0) {
-        D3D11_SUBRESOURCE_DATA init_data = {};
-        init_data.pSysMem = payload + sizeof(CreateTexture2DPayload);
-        init_data.SysMemPitch = p->sys_mem_pitch;
-        init_data.SysMemSlicePitch = p->sys_mem_slice_pitch;
-        hr = device->CreateTexture2D(&desc, &init_data, &texture);
-    } else {
-        hr = device->CreateTexture2D(&desc, nullptr, &texture);
-    }
+    hr = device->CreateTexture2D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
 
     if (FAILED(hr)) {
         std::cerr << "[ServerDispatcher] CreateTexture2D failed: 0x" << std::hex << hr << std::dec
@@ -515,9 +569,29 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
     if (use_desc) {
         desc.Format = static_cast<DXGI_FORMAT>(p->format);
         desc.ViewDimension = static_cast<D3D11_SRV_DIMENSION>(p->view_dimension);
-        if (desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D) {
-            desc.Texture2D.MostDetailedMip = p->most_detailed_mip;
-            desc.Texture2D.MipLevels = p->mip_levels;
+        switch (desc.ViewDimension) {
+            case D3D11_SRV_DIMENSION_TEXTURE2D:
+            case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
+            case D3D11_SRV_DIMENSION_TEXTURECUBE:
+            case D3D11_SRV_DIMENSION_TEXTURECUBEARRAY: {
+                // These share the union layout {MostDetailedMip, MipLevels, first slice/face, count}.
+                desc.Texture2DArray.MostDetailedMip = p->most_detailed_mip;
+                desc.Texture2DArray.MipLevels = p->mip_levels;
+                CreateSrvArrayRange range = {0, 1};
+                if (size >= sizeof(CreateSrvPayload) + sizeof(CreateSrvArrayRange)) {
+                    std::memcpy(&range, payload + sizeof(CreateSrvPayload), sizeof(range));
+                } else if (desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+                    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+                    D3D11_TEXTURE2D_DESC td = {};
+                    if (SUCCEEDED(resource.As(&tex))) tex->GetDesc(&td);
+                    range.array_size = td.ArraySize ? td.ArraySize : 1; // older clients: whole array
+                }
+                desc.Texture2DArray.FirstArraySlice = range.first_array_slice;
+                desc.Texture2DArray.ArraySize = range.array_size;
+                break;
+            }
+            default:
+                break; // other dimensions keep a zeroed union (not forwarded yet)
         }
     }
 
@@ -1204,6 +1278,53 @@ bool ServerDispatcher::HandleUpdateSubresource(const PacketHeader& /*header*/, c
         box.bottom = p->dst_box.bottom;
         box.back = p->dst_box.back;
         p_box = &box;
+    }
+
+    // Direct3D reads the source by pitch and box without knowing how many bytes arrived, and
+    // does not bound-check the box: compute the exact read size and check it here.
+    uint64_t needed = 0;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    res->GetType(&dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+        res.As(&buffer);
+        D3D11_BUFFER_DESC bd = {};
+        buffer->GetDesc(&bd);
+        if (p->subresource != 0 || (p_box && box.right > bd.ByteWidth)) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: buffer range out of bounds" << std::endl;
+            return false;
+        }
+        needed = p_box ? (box.right - box.left) : bd.ByteWidth;
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        res.As(&texture);
+        D3D11_TEXTURE2D_DESC td = {};
+        texture->GetDesc(&td);
+        if (p->subresource >= td.MipLevels * td.ArraySize) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: subresource " << p->subresource << " out of range" << std::endl;
+            return false;
+        }
+        const uint32_t mip = p->subresource % td.MipLevels;
+        const uint32_t mw = MipSize(td.Width, mip), mh = MipSize(td.Height, mip);
+        if (p_box && (box.right > mw || box.bottom > mh || box.front != 0 || box.back != 1)) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: box outside the " << mw << "x" << mh << " subresource" << std::endl;
+            return false;
+        }
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(td.Format, p_box ? box.right - box.left : mw, p_box ? box.bottom - box.top : mh, row_bytes, rows) ||
+            p->row_pitch < row_bytes) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: unsupported format or row pitch too small" << std::endl;
+            return false;
+        }
+        needed = static_cast<uint64_t>(p->row_pitch) * (rows - 1) + row_bytes;
+    } else {
+        std::cerr << "[ServerDispatcher] UpdateSubresource: unsupported resource dimension " << dim << std::endl;
+        return false;
+    }
+    if (p->data_size < needed) {
+        std::cerr << "[ServerDispatcher] UpdateSubresource: " << p->data_size << " bytes sent, " << needed << " needed" << std::endl;
+        return false;
     }
 
     const void* p_data = payload + sizeof(UpdateSubresourcePayload);

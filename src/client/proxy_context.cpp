@@ -1,4 +1,5 @@
 #include "proxy_context.h"
+#include "dxgi_format_info.h"
 
 #include <algorithm>
 #include <cstring>
@@ -259,10 +260,17 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::UpdateSubresource(ID3D11Resource
         static_cast<ID3D11Buffer*>(pDstResource)->GetDesc(&desc);
         data_size = pDstBox ? (pDstBox->right - pDstBox->left) : desc.ByteWidth;
     } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        // Exact bytes Direct3D reads for this subresource (mip size, BC block rows).
         D3D11_TEXTURE2D_DESC desc;
         static_cast<ID3D11Texture2D*>(pDstResource)->GetDesc(&desc);
-        const uint32_t rows = pDstBox ? (pDstBox->bottom - pDstBox->top) : desc.Height;
-        data_size = SrcRowPitch * rows;
+        const uint32_t mip_levels = desc.MipLevels ? desc.MipLevels : FullMipCount(desc.Width, desc.Height);
+        const uint32_t mip = DstSubresource % mip_levels;
+        const uint32_t width = pDstBox ? pDstBox->right - pDstBox->left : MipSize(desc.Width, mip);
+        const uint32_t height = pDstBox ? pDstBox->bottom - pDstBox->top : MipSize(desc.Height, mip);
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(desc.Format, width, height, row_bytes, rows) || SrcRowPitch < row_bytes) return;
+        data_size = static_cast<uint32_t>(static_cast<uint64_t>(SrcRowPitch) * (rows - 1) + row_bytes);
     } else {
         return;
     }
