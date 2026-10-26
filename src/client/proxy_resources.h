@@ -14,6 +14,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
+#include "dxgi_format_info.h"
 
 #include <cstdint>
 #include <vector>
@@ -150,8 +151,18 @@ public:
     }
 
     // Dynamic buffer shadow mapping accessors
-    uint8_t* GetShadowData() noexcept { return m_shadowData.empty() ? nullptr : m_shadowData.data(); }
-    const uint8_t* GetShadowData() const noexcept { return m_shadowData.empty() ? nullptr : m_shadowData.data(); }
+    uint8_t* GetShadowData() noexcept {
+        if (m_shadowData.empty()) {
+            m_shadowData.resize(m_desc.ByteWidth ? m_desc.ByteWidth : 256, 0);
+        }
+        return m_shadowData.data();
+    }
+    const uint8_t* GetShadowData() const noexcept {
+        if (m_shadowData.empty()) {
+            const_cast<std::vector<uint8_t>&>(m_shadowData).resize(m_desc.ByteWidth ? m_desc.ByteWidth : 256, 0);
+        }
+        return m_shadowData.data();
+    }
     const D3D11_BUFFER_DESC& GetDesc() const noexcept { return m_desc; }
     bool IsMapped() const noexcept { return m_isMapped; }
     void SetMapped(bool mapped, UINT subres = 0, D3D11_MAP type = D3D11_MAP_WRITE_DISCARD) noexcept {
@@ -159,6 +170,7 @@ public:
         m_mappedSubresource = subres;
         m_mappedType = type;
     }
+    D3D11_MAP GetMappedType() const noexcept { return m_mappedType; }
 
 private:
     D3D11_BUFFER_DESC    m_desc{};
@@ -243,11 +255,54 @@ public:
         pDesc->SampleDesc = m_desc.SampleDesc;
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE Map(DXGI_MAPPED_RECT*, UINT) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE Unmap() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Map(DXGI_MAPPED_RECT* pLockedRect, UINT) override {
+        if (!pLockedRect) return E_INVALIDARG;
+        UINT rowPitch = 0, depthPitch = 0;
+        pLockedRect->pBits = GetOrCreateShadowData(0, rowPitch, depthPitch);
+        pLockedRect->Pitch = rowPitch;
+        m_isMapped = true;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Unmap() override {
+        m_isMapped = false;
+        return S_OK;
+    }
+
+    uint8_t* GetOrCreateShadowData(UINT subresource, UINT& outRowPitch, UINT& outDepthPitch) {
+        const uint32_t mip_levels = m_desc.MipLevels ? m_desc.MipLevels : 1;
+        const uint32_t mip = subresource % mip_levels;
+        const uint32_t mw = MipSize(m_desc.Width, mip);
+        const uint32_t mh = MipSize(m_desc.Height, mip);
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(m_desc.Format, mw, mh, row_bytes, rows) || row_bytes == 0) {
+            row_bytes = static_cast<uint64_t>(mw) * 4;
+            rows = mh;
+        }
+        outRowPitch = static_cast<UINT>(row_bytes);
+        outDepthPitch = static_cast<UINT>(row_bytes * rows);
+        const size_t needed = static_cast<size_t>(outDepthPitch ? outDepthPitch : 64);
+        if (m_shadowData.size() < needed) {
+            m_shadowData.resize(needed, 0);
+        }
+        return m_shadowData.data();
+    }
+    bool IsMapped() const noexcept { return m_isMapped; }
+    void SetMapped(bool mapped, UINT subres = 0, D3D11_MAP type = D3D11_MAP_READ) noexcept {
+        m_isMapped = mapped;
+        m_mappedSubresource = subres;
+        m_mappedType = type;
+    }
+    UINT GetMappedSubresource() const noexcept { return m_mappedSubresource; }
+    D3D11_MAP GetMappedType() const noexcept { return m_mappedType; }
+    const D3D11_TEXTURE2D_DESC& GetDesc() const noexcept { return m_desc; }
 
 private:
     D3D11_TEXTURE2D_DESC m_desc{};
+    std::vector<uint8_t> m_shadowData;
+    bool                 m_isMapped{false};
+    UINT                 m_mappedSubresource{0};
+    D3D11_MAP            m_mappedType{D3D11_MAP_READ};
 };
 
 // =============================================================================
@@ -296,8 +351,42 @@ public:
         if (pDesc) *pDesc = m_desc;
     }
 
+    uint8_t* GetOrCreateShadowData(UINT subresource, UINT& outRowPitch, UINT& outDepthPitch) {
+        const uint32_t mip_levels = m_desc.MipLevels ? m_desc.MipLevels : 1;
+        const uint32_t mip = subresource % mip_levels;
+        const uint32_t mw = MipSize(m_desc.Width, mip);
+        const uint32_t mh = MipSize(m_desc.Height, mip);
+        const uint32_t md = MipSize(m_desc.Depth, mip);
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(m_desc.Format, mw, mh, row_bytes, rows) || row_bytes == 0) {
+            row_bytes = static_cast<uint64_t>(mw) * 4;
+            rows = mh;
+        }
+        outRowPitch = static_cast<UINT>(row_bytes);
+        outDepthPitch = static_cast<UINT>(row_bytes * rows);
+        const size_t needed = static_cast<size_t>(outDepthPitch * (md ? md : 1));
+        if (m_shadowData.size() < needed) {
+            m_shadowData.resize(needed ? needed : 64, 0);
+        }
+        return m_shadowData.data();
+    }
+    bool IsMapped() const noexcept { return m_isMapped; }
+    void SetMapped(bool mapped, UINT subres = 0, D3D11_MAP type = D3D11_MAP_READ) noexcept {
+        m_isMapped = mapped;
+        m_mappedSubresource = subres;
+        m_mappedType = type;
+    }
+    UINT GetMappedSubresource() const noexcept { return m_mappedSubresource; }
+    D3D11_MAP GetMappedType() const noexcept { return m_mappedType; }
+    const D3D11_TEXTURE3D_DESC& GetDesc() const noexcept { return m_desc; }
+
 private:
     D3D11_TEXTURE3D_DESC m_desc{};
+    std::vector<uint8_t> m_shadowData;
+    bool                 m_isMapped{false};
+    UINT                 m_mappedSubresource{0};
+    D3D11_MAP            m_mappedType{D3D11_MAP_READ};
 };
 
 // =============================================================================
@@ -346,8 +435,39 @@ public:
         if (pDesc) *pDesc = m_desc;
     }
 
+    uint8_t* GetOrCreateShadowData(UINT subresource, UINT& outRowPitch, UINT& outDepthPitch) {
+        const uint32_t mip_levels = m_desc.MipLevels ? m_desc.MipLevels : 1;
+        const uint32_t mip = subresource % mip_levels;
+        const uint32_t mw = MipSize(m_desc.Width, mip);
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(m_desc.Format, mw, 1, row_bytes, rows) || row_bytes == 0) {
+            row_bytes = static_cast<uint64_t>(mw) * 4;
+        }
+        outRowPitch = static_cast<UINT>(row_bytes);
+        outDepthPitch = static_cast<UINT>(row_bytes);
+        const size_t needed = static_cast<size_t>(row_bytes ? row_bytes : 64);
+        if (m_shadowData.size() < needed) {
+            m_shadowData.resize(needed, 0);
+        }
+        return m_shadowData.data();
+    }
+    bool IsMapped() const noexcept { return m_isMapped; }
+    void SetMapped(bool mapped, UINT subres = 0, D3D11_MAP type = D3D11_MAP_READ) noexcept {
+        m_isMapped = mapped;
+        m_mappedSubresource = subres;
+        m_mappedType = type;
+    }
+    UINT GetMappedSubresource() const noexcept { return m_mappedSubresource; }
+    D3D11_MAP GetMappedType() const noexcept { return m_mappedType; }
+    const D3D11_TEXTURE1D_DESC& GetDesc() const noexcept { return m_desc; }
+
 private:
     D3D11_TEXTURE1D_DESC m_desc{};
+    std::vector<uint8_t> m_shadowData;
+    bool                 m_isMapped{false};
+    UINT                 m_mappedSubresource{0};
+    D3D11_MAP            m_mappedType{D3D11_MAP_READ};
 };
 
 // =============================================================================

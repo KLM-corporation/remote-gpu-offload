@@ -797,9 +797,8 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
     }
 
     const auto* p = reinterpret_cast<const CreateSrvPayload*>(payload);
-    if (p->res_id == 0 || p->resource_id == 0) {
-        std::cerr << "[ServerDispatcher] CreateSrv: invalid res_id or resource_id (res_id=" 
-                  << p->res_id << ", resource_id=" << p->resource_id << ")" << std::endl;
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateSrv: invalid res_id=0" << std::endl;
         return false;
     }
 
@@ -818,7 +817,12 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
     ID3D11Device* device = m_gpuDevice.GetDevice();
     if (!device) return false;
 
-    Microsoft::WRL::ComPtr<ID3D11Resource> resource = m_resources.Get<ID3D11Resource>(p->resource_id);
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    if (p->resource_id == 0) {
+        resource = m_gpuDevice.GetColorTexture();
+    } else {
+        resource = m_resources.Get<ID3D11Resource>(p->resource_id);
+    }
     if (!resource) {
         std::cerr << "[ServerDispatcher] CreateSrv: underlying resource not found: " << p->resource_id << std::endl;
         return false;
@@ -846,10 +850,14 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
 
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
     HRESULT hr = device->CreateShaderResourceView(resource.Get(), use_desc ? &desc : nullptr, &srv);
+    if (FAILED(hr) && use_desc) {
+        // Fallback to default view for the resource
+        hr = device->CreateShaderResourceView(resource.Get(), nullptr, &srv);
+    }
     if (FAILED(hr)) {
         std::cerr << "[ServerDispatcher] CreateShaderResourceView failed: 0x" << std::hex << hr << std::dec
                   << " (res_id=" << p->res_id << ")" << std::endl;
-        return false;
+        return true; // Don't abort the connection
     }
 
     m_resources.Register(p->res_id, srv);
@@ -912,14 +920,46 @@ bool ServerDispatcher::HandleCreateRtv(const PacketHeader& /*header*/, const uin
         if (use_desc) {
             desc.Format = static_cast<DXGI_FORMAT>(p->format);
             desc.ViewDimension = static_cast<D3D11_RTV_DIMENSION>(p->view_dimension);
-            desc.Texture2D.MipSlice = p->mip_slice;
+            if (desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DARRAY) {
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> tex2D;
+                if (SUCCEEDED(resource.As(&tex2D))) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    tex2D->GetDesc(&td);
+                    desc.Texture2DArray.MipSlice = p->mip_slice;
+                    desc.Texture2DArray.FirstArraySlice = 0;
+                    desc.Texture2DArray.ArraySize = td.ArraySize ? td.ArraySize : 1;
+                } else {
+                    desc.Texture2DArray.MipSlice = p->mip_slice;
+                    desc.Texture2DArray.FirstArraySlice = 0;
+                    desc.Texture2DArray.ArraySize = 1;
+                }
+            } else if (desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE3D) {
+                Microsoft::WRL::ComPtr<ID3D11Texture3D> tex3D;
+                if (SUCCEEDED(resource.As(&tex3D))) {
+                    D3D11_TEXTURE3D_DESC td{};
+                    tex3D->GetDesc(&td);
+                    desc.Texture3D.MipSlice = p->mip_slice;
+                    desc.Texture3D.FirstWSlice = 0;
+                    desc.Texture3D.WSize = td.Depth ? td.Depth : 1;
+                } else {
+                    desc.Texture3D.MipSlice = p->mip_slice;
+                    desc.Texture3D.FirstWSlice = 0;
+                    desc.Texture3D.WSize = 1;
+                }
+            } else {
+                desc.Texture2D.MipSlice = p->mip_slice;
+            }
         }
 
         HRESULT hr = device->CreateRenderTargetView(resource.Get(), use_desc ? &desc : nullptr, &rtv);
+        if (FAILED(hr) && use_desc) {
+            // Fallback to default view for the resource
+            hr = device->CreateRenderTargetView(resource.Get(), nullptr, &rtv);
+        }
         if (FAILED(hr)) {
             std::cerr << "[ServerDispatcher] CreateRenderTargetView failed: 0x" << std::hex << hr << std::dec
                       << " (res_id=" << p->res_id << ")" << std::endl;
-            return false;
+            return true; // Don't abort the connection
         }
     }
 
@@ -1231,7 +1271,10 @@ bool ServerDispatcher::HandleDestroyResource(const PacketHeader& /*header*/, con
     }
 
     const auto* p = reinterpret_cast<const DestroyResourcePayload*>(payload);
-    return m_resources.Destroy(p->res_id);
+    if (p->res_id != 0) {
+        m_resources.Destroy(p->res_id);
+    }
+    return true; // Destroying a resource is idempotent
 }
 
 // =============================================================================

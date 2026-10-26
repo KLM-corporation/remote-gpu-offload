@@ -413,36 +413,99 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11DeviceContext::Map(ID3D11Resource* pResource
 
     D3D11_RESOURCE_DIMENSION dim;
     pResource->GetType(&dim);
-    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return E_NOTIMPL; // texture CPU mapping is not forwarded
 
-    auto* buffer = static_cast<ProxyBuffer*>(static_cast<ID3D11Buffer*>(pResource));
-    if (!buffer->GetShadowData()) return E_FAIL; // not a CPU-writable buffer
-    if (MapType == D3D11_MAP_READ || MapType == D3D11_MAP_READ_WRITE) return E_NOTIMPL;
-    if (buffer->IsMapped()) return DXGI_ERROR_WAS_STILL_DRAWING;
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        auto* buffer = static_cast<ProxyBuffer*>(static_cast<ID3D11Buffer*>(pResource));
+        buffer->SetMapped(true, Subresource, MapType);
+        pMappedResource->pData = buffer->GetShadowData();
+        pMappedResource->RowPitch = buffer->GetDesc().ByteWidth;
+        pMappedResource->DepthPitch = buffer->GetDesc().ByteWidth;
+        return S_OK;
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        auto* tex = static_cast<ProxyTexture2D*>(static_cast<ID3D11Texture2D*>(pResource));
+        UINT rowPitch = 0, depthPitch = 0;
+        uint8_t* ptr = tex->GetOrCreateShadowData(Subresource, rowPitch, depthPitch);
+        tex->SetMapped(true, Subresource, MapType);
+        pMappedResource->pData = ptr;
+        pMappedResource->RowPitch = rowPitch;
+        pMappedResource->DepthPitch = depthPitch;
+        return S_OK;
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+        auto* tex = static_cast<ProxyTexture3D*>(static_cast<ID3D11Texture3D*>(pResource));
+        UINT rowPitch = 0, depthPitch = 0;
+        uint8_t* ptr = tex->GetOrCreateShadowData(Subresource, rowPitch, depthPitch);
+        tex->SetMapped(true, Subresource, MapType);
+        pMappedResource->pData = ptr;
+        pMappedResource->RowPitch = rowPitch;
+        pMappedResource->DepthPitch = depthPitch;
+        return S_OK;
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE1D) {
+        auto* tex = static_cast<ProxyTexture1D*>(static_cast<ID3D11Texture1D*>(pResource));
+        UINT rowPitch = 0, depthPitch = 0;
+        uint8_t* ptr = tex->GetOrCreateShadowData(Subresource, rowPitch, depthPitch);
+        tex->SetMapped(true, Subresource, MapType);
+        pMappedResource->pData = ptr;
+        pMappedResource->RowPitch = rowPitch;
+        pMappedResource->DepthPitch = depthPitch;
+        return S_OK;
+    }
 
-    buffer->SetMapped(true, Subresource, MapType);
-    pMappedResource->pData = buffer->GetShadowData();
-    pMappedResource->RowPitch = buffer->GetDesc().ByteWidth;
-    pMappedResource->DepthPitch = buffer->GetDesc().ByteWidth;
-    return S_OK;
+    return E_NOTIMPL;
 }
 
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Unmap(ID3D11Resource* pResource, UINT) {
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Unmap(ID3D11Resource* pResource, UINT Subresource) {
     if (!pResource) return;
     D3D11_RESOURCE_DIMENSION dim;
     pResource->GetType(&dim);
-    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return;
 
-    auto* buffer = static_cast<ProxyBuffer*>(static_cast<ID3D11Buffer*>(pResource));
-    if (!buffer->IsMapped()) return;
-    buffer->SetMapped(false);
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        auto* buffer = static_cast<ProxyBuffer*>(static_cast<ID3D11Buffer*>(pResource));
+        if (!buffer->IsMapped()) return;
+        const D3D11_MAP mapType = buffer->GetMappedType();
+        buffer->SetMapped(false);
 
-    const uint32_t size = buffer->GetDesc().ByteWidth;
-    std::vector<uint8_t> msg(sizeof(WriteBufferDiscardPayload) + size);
-    WriteBufferDiscardPayload head = {buffer->GetResourceId(), 0, size};
-    std::memcpy(msg.data(), &head, sizeof(head));
-    std::memcpy(msg.data() + sizeof(head), buffer->GetShadowData(), size);
-    Send(OP_WRITE_BUFFER_DISCARD, msg.data(), static_cast<uint32_t>(msg.size()));
+        if (mapType != D3D11_MAP_READ) {
+            const uint32_t size = buffer->GetDesc().ByteWidth;
+            std::vector<uint8_t> msg(sizeof(WriteBufferDiscardPayload) + size);
+            WriteBufferDiscardPayload head = {buffer->GetResourceId(), 0, size};
+            std::memcpy(msg.data(), &head, sizeof(head));
+            std::memcpy(msg.data() + sizeof(head), buffer->GetShadowData(), size);
+            Send(OP_WRITE_BUFFER_DISCARD, msg.data(), static_cast<uint32_t>(msg.size()));
+        }
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        auto* tex = static_cast<ProxyTexture2D*>(static_cast<ID3D11Texture2D*>(pResource));
+        if (!tex->IsMapped()) return;
+        const D3D11_MAP mapType = tex->GetMappedType();
+        tex->SetMapped(false);
+
+        if (mapType != D3D11_MAP_READ) {
+            UINT rowPitch = 0, depthPitch = 0;
+            uint8_t* ptr = tex->GetOrCreateShadowData(Subresource, rowPitch, depthPitch);
+            UpdateSubresource(pResource, Subresource, nullptr, ptr, rowPitch, depthPitch);
+        }
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+        auto* tex = static_cast<ProxyTexture3D*>(static_cast<ID3D11Texture3D*>(pResource));
+        if (!tex->IsMapped()) return;
+        const D3D11_MAP mapType = tex->GetMappedType();
+        tex->SetMapped(false);
+
+        if (mapType != D3D11_MAP_READ) {
+            UINT rowPitch = 0, depthPitch = 0;
+            uint8_t* ptr = tex->GetOrCreateShadowData(Subresource, rowPitch, depthPitch);
+            UpdateSubresource(pResource, Subresource, nullptr, ptr, rowPitch, depthPitch);
+        }
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE1D) {
+        auto* tex = static_cast<ProxyTexture1D*>(static_cast<ID3D11Texture1D*>(pResource));
+        if (!tex->IsMapped()) return;
+        const D3D11_MAP mapType = tex->GetMappedType();
+        tex->SetMapped(false);
+
+        if (mapType != D3D11_MAP_READ) {
+            UINT rowPitch = 0, depthPitch = 0;
+            uint8_t* ptr = tex->GetOrCreateShadowData(Subresource, rowPitch, depthPitch);
+            UpdateSubresource(pResource, Subresource, nullptr, ptr, rowPitch, depthPitch);
+        }
+    }
 }
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::UpdateSubresource(ID3D11Resource* pDstResource, UINT DstSubresource,
