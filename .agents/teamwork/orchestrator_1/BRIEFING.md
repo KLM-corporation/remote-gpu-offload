@@ -82,12 +82,13 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | explorer_m3_1 | teamwork_preview_explorer | Milestone 3: Proxy COM objects (Device, Context) spec | completed | 4e7f95af-fe3e-4468-b502-9f13dc0650f8 |
 | explorer_m3_2 | teamwork_preview_explorer | Milestone 3: Wrapper DLL exports and GDI presentation spec | completed | 282d59af-9f89-4d1d-844f-c8fd99fd83d0 |
 | explorer_m3_3 | teamwork_preview_explorer | Milestone 3: Client proxy test suite spec | completed | 99feb133-edb4-406c-a7cf-b864ac69c080 |
-| worker_m3_1 | teamwork_preview_worker | Milestone 3: Implement client proxy COM, wrappers, GDI presenter, test suite | in-progress | 06c5c15f-fb88-45b7-ba8a-00fc5fbb01ab |
+| worker_m3_1 | teamwork_preview_worker | Milestone 3: Implement client proxy COM, wrappers, GDI presenter, test suite | failed | 06c5c15f-fb88-45b7-ba8a-00fc5fbb01ab |
+| worker_m3_2 | teamwork_preview_worker | Milestone 3: Replacement worker to complete and verify client proxy and test suite | in-progress | 18fbe42a-15df-4733-98fb-8db7b3e6cae2 |
 
 ## Succession Status
 - Succession required: no (singleton orchestrator)
-- Spawn count: 34 / 128
-- Pending subagents: 06c5c15f-fb88-45b7-ba8a-00fc5fbb01ab
+- Spawn count: 35 / 128
+- Pending subagents: 18fbe42a-15df-4733-98fb-8db7b3e6cae2
 - Predecessor: none
 - Successor: none
 
