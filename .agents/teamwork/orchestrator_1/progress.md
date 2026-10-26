@@ -1,6 +1,6 @@
 # Progress — Remote GPU Offload
 
-Last visited: 2026-10-26T18:00:15Z
+Last visited: 2026-10-26T18:20:15Z
 
 ## Current Status
 - [x] Initialized workspace and briefing
@@ -9,16 +9,16 @@ Last visited: 2026-10-26T18:00:15Z
 - [x] Phase 1: Architecture, Milestone Decomposition, and Interface Contracts in PROJECT.md and TEST_INFRA.md
 - [/] Phase 2: Dual Track Execution (Implementation Track + E2E Testing Track)
   - [x] Milestone 1: Core Network Protocol & Transport Serialization (PASSED gate: 2 reviewers, 2 challengers, auditor clean)
-  - [/] Milestone 2: Remote GPU Execution Server (Iteration 2: 5 verification agents active)
-  - [ ] Milestone 3: Client Direct3D Hooking & Proxy Layer (d3d11/dxgi proxy, command interception, state tracker)
+  - [x] Milestone 2: Remote GPU Execution Server (PASSED gate: 2 reviewers, 2 challengers, auditor clean; 696k cmds/s, 0 crashes)
+  - [/] Milestone 3: Client Direct3D Hooking & Proxy Layer (d3d11/dxgi proxy, command interception, state tracker)
   - [ ] Milestone 4: Framebuffer Readback & Client Presentation Pipeline (GPU texture readback, transfer, swapchain present)
   - [ ] Milestone 5: E2E Automated Test Suite & Loopback Verification (3D textured mesh demo, loopback 60 frames, pixel verification, non-blank checks)
 - [ ] Phase 3: Final Verification and Victory Audit Claim
 
 ## Iteration Status
-Current iteration: 3 / 32
+Current iteration: 4 / 32
 
 ## Retrospective Notes
 - Milestone 1 fully verified and passed gate.
-- Milestone 2 Gate Iteration 1 failed due to challenger_m2_1 finding driver crash vulnerability on unvalidated topology/slot parameters.
-- Dispatched 3 remediation explorers to design robust parameter bounds checking in server_dispatcher.cpp.
+- Milestone 2 Gate Iteration 2 passed with 100% clean verdicts from Reviewers, Challengers, and Forensic Auditor after parameter bounds validation was implemented.
+- Transitioning to Milestone 3: Client Direct3D Interception & Presentation.

@@ -1,4 +1,4 @@
-# BRIEFING — 2026-10-26T18:11:00Z
+# BRIEFING — 2026-10-26T18:20:00Z
 
 ## Mission
 Empirically challenge and verify the remediation of Milestone 2 (Remote GPU Execution Server) against crash defects, stress, and adversarial fuzzing.
@@ -26,17 +26,26 @@ Empirically challenge and verify the remediation of Milestone 2 (Remote GPU Exec
 - **Review criteria**: Robustness against D3D11 primitive topology corruption, OOB slot numbers, 10,000 randomized opcodes, stress test pass rate
 
 ## Key Decisions Made
-- Plan to execute `test_server_stress.exe` directly
-- Plan to write and execute a dedicated fuzz test client `tests/test_server_fuzz.cpp` targeting server.exe with 10,000 randomized packets, out-of-bounds slots, and corrupt topology values
+- Compiled and executed `tests/test_server_stress.cpp` against remediated code (181/181 assertions passed, 0 failures).
+- Developed and executed dedicated adversarial fuzzer `tests/test_server_fuzz.cpp` against standalone `build/server.exe` process (135/135 assertions passed, 10,000 packets fuzzed, 0 crashes, 0 hangs, 0xC0000005 eliminated).
+- Verified full post-fuzzing Direct3D pipeline responsiveness with clear & readback.
+- Final Verdict: `APPROVE`.
 
 ## Artifact Index
-- `challenge_report.md` — Detailed challenge findings and stress/fuzz results
-- `handoff.md` — 5-component handoff report
+- `challenge_report.md` — Detailed challenge findings, empirical fuzzing metrics, and stress results.
+- `handoff.md` — 5-component handoff report.
+- `progress.md` — Liveness and step tracking.
+- `DISPATCH.md` — Dispatch message audit log.
 
 ## Attack Surface
-- **Hypotheses tested**: None yet
-- **Vulnerabilities found**: None yet
-- **Untested angles**: Primitive topology bounds validation, out-of-bounds slot validation (CBV/SRV/UAV/Samplers/RTVs), fuzzing opcodes
+- **Hypotheses tested**:
+  - Out-of-range D3D11 primitive topology enum (e.g. 0x80000000, 65, 9999, gaps 6..9, 14..32): SAFELY REJECTED.
+  - Out-of-bounds pipeline slot numbers (VB >= 32, VS CB >= 14, PS CB >= 14, PS SRV >= 128, PS Sampler >= 16): SAFELY REJECTED.
+  - Non-null-terminated semantic name in CreateInputLayout: SAFELY BOUNDED by `strnlen`.
+  - 10,000 randomized opcodes and corrupted packets over loopback TCP: ALL REJECTED WITHOUT CRASH.
+  - Rapid multi-client disconnect churn: SERVER SURVIVED WITHOUT CRASH OR HANG.
+- **Vulnerabilities found**: None. Previous critical defect (0xC0000005 driver crash) is completely eliminated.
+- **Untested angles**: None within Milestone 2 execution server scope.
 
 ## Loaded Skills
 - None specified

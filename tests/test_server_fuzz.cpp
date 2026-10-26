@@ -70,7 +70,7 @@ struct ServerProcess {
     bool running = false;
 };
 
-static bool SpawnServer(uint16_t port, const std::string& log_filename, ServerProcess& out_proc) {
+static bool SpawnServer(uint16_t port, const std::string& log_filename, ServerProcess& out_proc, bool single_session = true) {
     out_proc.port = port;
     out_proc.running = false;
 
@@ -98,6 +98,9 @@ static bool SpawnServer(uint16_t port, const std::string& log_filename, ServerPr
     si.hStdError = out_proc.hLogFile;
 
     std::string cmd = "build\\server.exe --port " + std::to_string(port) + " --bind 127.0.0.1";
+    if (single_session) {
+        cmd += " --single-session";
+    }
     std::vector<char> cmd_buf(cmd.begin(), cmd.end());
     cmd_buf.push_back('\0');
 
@@ -107,7 +110,7 @@ static bool SpawnServer(uint16_t port, const std::string& log_filename, ServerPr
         NULL,
         NULL,
         TRUE, // Inherit log handle
-        0,
+        CREATE_NEW_PROCESS_GROUP,
         NULL,
         NULL,
         &si,
@@ -160,6 +163,9 @@ static DWORD ShutdownServer(ServerProcess& proc, NetworkSocket* sock = nullptr) 
         PacketHeader h{ RGPU_MAGIC, OP_SHUTDOWN, FLAG_NONE, 999999, sizeof(sp) };
         sock->SendPacket(h, &sp);
     }
+
+    // Signal console interrupt if daemon is in multi-session accept loop
+    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, proc.pi.dwProcessId);
 
     // Wait up to 3 seconds for clean exit
     DWORD wait_res = WaitForSingleObject(proc.pi.hProcess, 3000);
@@ -589,7 +595,7 @@ static void Test_MultiClientChurnUnderFuzzing() {
 
     const uint16_t port = 49204;
     ServerProcess proc;
-    FUZZ_ASSERT_MSG(SpawnServer(port, "build/server_fuzz_churn.log", proc), "Spawn server.exe on port 49204");
+    FUZZ_ASSERT_MSG(SpawnServer(port, "build/server_fuzz_churn.log", proc, false), "Spawn server.exe on port 49204");
 
     std::mt19937 rng(999);
     std::uniform_int_distribution<uint32_t> dist_u32(0, 0xFFFFFFFF);

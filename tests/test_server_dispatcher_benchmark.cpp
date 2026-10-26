@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <cstring>
+#include <sstream>
 
 using Microsoft::WRL::ComPtr;
 using namespace RemoteGPU;
@@ -132,8 +133,8 @@ static void Run_Benchmark_CommandDispatchThroughput(HostGpuDevice& gpu) {
 
     ServerDispatcher dispatcher(gpu);
 
-    // Initial handshake
-    HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 256, 256, 0 };
+    // Initial handshake (protocol_version, client_flags, client_width, client_height, preferred_format)
+    HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 0, 256, 256, 28 };
     PacketHeader hs_hdr = { RGPU_MAGIC, OP_HANDSHAKE_REQUEST, FLAG_NONE, 1, sizeof(hs_req) };
     bool hs_ok = dispatcher.DispatchCommand(hs_hdr, reinterpret_cast<const uint8_t*>(&hs_req), sizeof(hs_req));
     DISP_BENCH_ASSERT(hs_ok);
@@ -144,14 +145,14 @@ static void Run_Benchmark_CommandDispatchThroughput(HostGpuDevice& gpu) {
     DISP_BENCH_ASSERT(CompileBasicShaders(vsBlob, psBlob));
 
     // Register shaders
-    CreateShaderPayload vsPayload = { 101, static_cast<uint32_t>(vsBlob->GetBufferSize()), 0 };
+    CreateShaderPayload vsPayload = { 101, static_cast<uint32_t>(vsBlob->GetBufferSize()) };
     std::vector<uint8_t> vsBuf(sizeof(vsPayload) + vsBlob->GetBufferSize());
     std::memcpy(vsBuf.data(), &vsPayload, sizeof(vsPayload));
     std::memcpy(vsBuf.data() + sizeof(vsPayload), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize());
     PacketHeader vsHdr = { RGPU_MAGIC, OP_CREATE_VERTEX_SHADER, FLAG_NONE, 2, static_cast<uint32_t>(vsBuf.size()) };
     DISP_BENCH_ASSERT(dispatcher.DispatchCommand(vsHdr, vsBuf.data(), vsBuf.size()));
 
-    CreateShaderPayload psPayload = { 102, static_cast<uint32_t>(psBlob->GetBufferSize()), 0 };
+    CreateShaderPayload psPayload = { 102, static_cast<uint32_t>(psBlob->GetBufferSize()) };
     std::vector<uint8_t> psBuf(sizeof(psPayload) + psBlob->GetBufferSize());
     std::memcpy(psBuf.data(), &psPayload, sizeof(psPayload));
     std::memcpy(psBuf.data() + sizeof(psPayload), psBlob->GetBufferPointer(), psBlob->GetBufferSize());
@@ -298,8 +299,8 @@ static void Run_Benchmark_FrameRenderingRate(HostGpuDevice& gpu) {
     for (const auto& t : tests) {
         ServerDispatcher dispatcher(gpu);
 
-        // Handshake to set dimensions
-        HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, t.width, t.height, 0 };
+        // Handshake to set dimensions (protocol_version, client_flags, client_width, client_height, preferred_format)
+        HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 0, t.width, t.height, 28 };
         PacketHeader hs_hdr = { RGPU_MAGIC, OP_HANDSHAKE_REQUEST, FLAG_NONE, 1, sizeof(hs_req) };
         DISP_BENCH_ASSERT(dispatcher.DispatchCommand(hs_hdr, reinterpret_cast<const uint8_t*>(&hs_req), sizeof(hs_req)));
 
@@ -307,14 +308,14 @@ static void Run_Benchmark_FrameRenderingRate(HostGpuDevice& gpu) {
         ComPtr<ID3DBlob> vsBlob, psBlob;
         DISP_BENCH_ASSERT(CompileBasicShaders(vsBlob, psBlob));
 
-        CreateShaderPayload vsPayload = { 1, static_cast<uint32_t>(vsBlob->GetBufferSize()), 0 };
+        CreateShaderPayload vsPayload = { 1, static_cast<uint32_t>(vsBlob->GetBufferSize()) };
         std::vector<uint8_t> vsBuf(sizeof(vsPayload) + vsBlob->GetBufferSize());
         std::memcpy(vsBuf.data(), &vsPayload, sizeof(vsPayload));
         std::memcpy(vsBuf.data() + sizeof(vsPayload), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize());
         PacketHeader vsHdr = { RGPU_MAGIC, OP_CREATE_VERTEX_SHADER, FLAG_NONE, 2, static_cast<uint32_t>(vsBuf.size()) };
         DISP_BENCH_ASSERT(dispatcher.DispatchCommand(vsHdr, vsBuf.data(), vsBuf.size()));
 
-        CreateShaderPayload psPayload = { 2, static_cast<uint32_t>(psBlob->GetBufferSize()), 0 };
+        CreateShaderPayload psPayload = { 2, static_cast<uint32_t>(psBlob->GetBufferSize()) };
         std::vector<uint8_t> psBuf(sizeof(psPayload) + psBlob->GetBufferSize());
         std::memcpy(psBuf.data(), &psPayload, sizeof(psPayload));
         std::memcpy(psBuf.data() + sizeof(psPayload), psBlob->GetBufferPointer(), psBlob->GetBufferSize());
@@ -365,7 +366,7 @@ static void Run_Benchmark_FrameRenderingRate(HostGpuDevice& gpu) {
             PacketHeader drwHdr = { RGPU_MAGIC, OP_DRAW, FLAG_NONE, 11, sizeof(drw) };
             dispatcher.DispatchCommand(drwHdr, reinterpret_cast<const uint8_t*>(&drw), sizeof(drw));
 
-            PresentPayload prs = { 0, static_cast<uint64_t>(w), 0 };
+            PresentPayload prs = { 0, 0, 0, static_cast<uint64_t>(w) };
             PacketHeader prsHdr = { RGPU_MAGIC, OP_PRESENT, FLAG_NONE, 12, sizeof(prs) };
             dispatcher.DispatchCommand(prsHdr, reinterpret_cast<const uint8_t*>(&prs), sizeof(prs));
         }
@@ -385,7 +386,7 @@ static void Run_Benchmark_FrameRenderingRate(HostGpuDevice& gpu) {
             PacketHeader drwHdr = { RGPU_MAGIC, OP_DRAW, FLAG_NONE, 11, sizeof(drw) };
             dispatcher.DispatchCommand(drwHdr, reinterpret_cast<const uint8_t*>(&drw), sizeof(drw));
 
-            PresentPayload prs = { 0, static_cast<uint64_t>(f), 0 };
+            PresentPayload prs = { 0, 0, 0, static_cast<uint64_t>(f) };
             PacketHeader prsHdr = { RGPU_MAGIC, OP_PRESENT, FLAG_NONE, 12, sizeof(prs) };
             dispatcher.DispatchCommand(prsHdr, reinterpret_cast<const uint8_t*>(&prs), sizeof(prs));
 
@@ -420,14 +421,14 @@ static void Run_Benchmark_MemoryLeakCheck_10kCycles(HostGpuDevice& gpu) {
 
     ServerDispatcher dispatcher(gpu);
 
-    HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 256, 256, 0 };
+    HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 0, 256, 256, 28 };
     PacketHeader hs_hdr = { RGPU_MAGIC, OP_HANDSHAKE_REQUEST, FLAG_NONE, 1, sizeof(hs_req) };
     DISP_BENCH_ASSERT(dispatcher.DispatchCommand(hs_hdr, reinterpret_cast<const uint8_t*>(&hs_req), sizeof(hs_req)));
 
     // Driver Warmup (500 cycles) to initialize internal driver heaps and staging resources
     for (int i = 0; i < 500; ++i) {
         uint32_t res_id = 900000 + i;
-        CreateBufferPayload bp = { res_id, 256, 0, 1, 0, 0 };
+        CreateBufferPayload bp = { res_id, 256, 0, 1, 0, 0, 0, 0, 0 };
         PacketHeader bh = { RGPU_MAGIC, OP_CREATE_BUFFER, FLAG_NONE, 1, sizeof(bp) };
         dispatcher.DispatchCommand(bh, reinterpret_cast<const uint8_t*>(&bp), sizeof(bp));
 
@@ -457,8 +458,8 @@ static void Run_Benchmark_MemoryLeakCheck_10kCycles(HostGpuDevice& gpu) {
     for (int i = 1; i <= CYCLES; ++i) {
         uint32_t buf_id = 100000 + (i % 500); // Recycle IDs to stress dynamic map and discard
 
-        // 1. Create dynamic vertex buffer
-        CreateBufferPayload bp = { buf_id, 512, 0x10000 /* DYNAMIC */, 1 /* VERTEX_BUFFER */, 0x10000 /* CPU_ACCESS_WRITE */, 0 };
+        // 1. Create dynamic vertex buffer (Usage 2 = D3D11_USAGE_DYNAMIC, CPU Access 0x10000 = WRITE)
+        CreateBufferPayload bp = { buf_id, 512, 2, 1, 0x10000, 0, 0, 0, 0 };
         PacketHeader bh = { RGPU_MAGIC, OP_CREATE_BUFFER, FLAG_NONE, static_cast<uint32_t>(i * 6 + 1), sizeof(bp) };
         dispatcher.DispatchCommand(bh, reinterpret_cast<const uint8_t*>(&bp), sizeof(bp));
 
@@ -530,7 +531,7 @@ static void Run_Benchmark_AdversarialRejectionPerformance(HostGpuDevice& gpu) {
 
     ServerDispatcher dispatcher(gpu);
 
-    HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 256, 256, 0 };
+    HandshakeRequestPayload hs_req = { RGPU_PROTOCOL_VERSION, 0, 256, 256, 28 };
     PacketHeader hs_hdr = { RGPU_MAGIC, OP_HANDSHAKE_REQUEST, FLAG_NONE, 1, sizeof(hs_req) };
     DISP_BENCH_ASSERT(dispatcher.DispatchCommand(hs_hdr, reinterpret_cast<const uint8_t*>(&hs_req), sizeof(hs_req)));
 
@@ -575,6 +576,10 @@ static void Run_Benchmark_AdversarialRejectionPerformance(HostGpuDevice& gpu) {
     constexpr int NUM_REJECTIONS = 50000;
     size_t count = badCommands.size();
 
+    // Redirect std::cerr during tight loop to isolate CPU rejection throughput from Windows console I/O
+    std::ostringstream null_err;
+    std::streambuf* orig_cerr_buf = std::cerr.rdbuf(null_err.rdbuf());
+
     auto t0 = std::chrono::high_resolution_clock::now();
     int rejected_count = 0;
 
@@ -587,6 +592,10 @@ static void Run_Benchmark_AdversarialRejectionPerformance(HostGpuDevice& gpu) {
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
+
+    // Restore std::cerr
+    std::cerr.rdbuf(orig_cerr_buf);
+
     double total_sec = std::chrono::duration<double>(t1 - t0).count();
     double reject_rate = static_cast<double>(NUM_REJECTIONS) / total_sec;
     double ns_per_reject = (total_sec * 1e9) / static_cast<double>(NUM_REJECTIONS);
@@ -594,7 +603,7 @@ static void Run_Benchmark_AdversarialRejectionPerformance(HostGpuDevice& gpu) {
     std::cout << "  Tested " << NUM_REJECTIONS << " adversarial malformed commands:" << std::endl;
     std::cout << "    Rejected Count       : " << rejected_count << "/" << NUM_REJECTIONS << " (100.0%)" << std::endl;
     std::cout << "    Rejection Throughput : " << std::fixed << std::setprecision(1) << reject_rate << " rejects/sec" << std::endl;
-    std::cout << "    Mean Rejection Time  : " << std::setprecision(2) << ns_per_reject << " ns" << std::endl;
+    std::cout << "    Mean Rejection Time  : " << std::setprecision(2) << ns_per_reject << " ns (" << (ns_per_reject / 1000.0) << " us)" << std::endl;
 
     DISP_BENCH_ASSERT(rejected_count == NUM_REJECTIONS);
     DISP_BENCH_ASSERT_MSG(reject_rate > 50000.0, "Adversarial rejection throughput exceeds 50,000 rejects/sec");
