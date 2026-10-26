@@ -7,3 +7,7 @@ bin/
 *.pdb
 *.ilk
 .cache/
+
+# Python bytecode (created when the test scripts run)
+__pycache__/
+*.pyc
