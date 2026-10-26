@@ -78,8 +78,8 @@ Every feature identified during Phase 0 Survey is inventoried and assigned to an
 |---|------|-------|-------------|--------|
 | M1 | Network Protocol & Transport Layer | Common protocol header (`protocol.h`), Winsock2 TCP transport class (`transport.h`, `transport.cpp`), packet serialization, handshake, and transport unit tests (`test_transport.cpp`) | none | DONE |
 | M2 | Remote GPU Execution Server | Dedicated adapter selection, headless D3D11 device creation, server resource manager, command execution dispatcher, staging framebuffer readback, and server unit tests (`test_server.cpp`) | M1 | DONE |
-| M3 | Client Direct3D Interception & Presentation | Drop-in `d3d11.dll`/`dxgi.dll`, COM proxies (`ProxyDevice`, `ProxyContext`, `ProxySwapChain`), dynamic buffer shadow mapper, Win32 GDI zero-GPU presentation, and client proxy unit tests (`test_client_proxy.cpp`) | M1, M2 | IN_PROGRESS |
-| M4 | 3D Sample App & Automated Verification Suite | Standalone 3D dynamic textured mesh sample application (`sample_cube.exe`), automated loopback test runner (`run_loopback_test.py`), and mathematical pixel verifier (`verify_pixels.py`) | M1, M2, M3 | PLANNED |
+| M3 | Client Direct3D Interception & Presentation | Drop-in `d3d11.dll`/`dxgi.dll`, COM proxies (`ProxyDevice`, `ProxyContext`, `ProxySwapChain`), dynamic buffer shadow mapper, Win32 GDI zero-GPU presentation, and client proxy unit tests (`test_client_proxy.cpp`) | M1, M2 | DONE (`dxgi.dll` wrapper deferred) |
+| M4 | 3D Sample App & Automated Verification Suite | Standalone 3D dynamic textured mesh sample application (`sample_cube.exe`), automated loopback test runner (`run_loopback_test.py`), and mathematical pixel verifier (`verify_pixels.py`) | M1, M2, M3 | DONE |
 | M5 | E2E Integration, Hardening & Final Gate | Full end-to-end integration running client proxy with sample app against server on 127.0.0.1 for >= 60 frames, pixel verification, network disconnect test, and clean exit code 0 | M1, M2, M3, M4 | PLANNED |
 
 ---
@@ -244,9 +244,11 @@ remote_gpu_offload/
   ```
 - **Build 3D Sample App**:
   ```powershell
-  clang++ -std=c++17 -O2 -Isrc/sample_app src/sample_app/main_sample.cpp -o build/sample_cube.exe -ld3d11 -ldxgi -ld3dcompiler
+  clang++ -std=c++17 -O2 -static -Isrc/sample_app src/sample_app/main_sample.cpp -o build/client/sample_cube.exe -ld3d11 -ld3dcompiler -luser32 -ldxguid
   ```
 - **Run Automated Loopback Test**:
   ```powershell
-  python scripts/run_loopback_test.py --port 48888 --frames 60
+  python scripts/run_loopback_test.py --port 48888 --frames 60 --build
   ```
+  `--build` compiles the server, proxy DLL and sample first. Artifacts (server/client logs, `last_frame.bmp`/`.png`, `pixel_metrics.json`) go to `build/loopback_artifacts/`.
+  Pixel check alone: `python tests/verify_pixels.py <frame.bmp> [--png out.png] [--json out.json]` (exit code 0 = pass, 1 = criteria failed, 2 = unreadable frame).
