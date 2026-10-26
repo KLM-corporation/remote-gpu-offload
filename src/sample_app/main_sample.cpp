@@ -2,8 +2,9 @@
 // It is a plain D3D11 application. Placed next to the proxy d3d11.dll it renders on the remote
 // GPU server; on its own it renders on the local GPU.
 //
-// Usage: sample_cube.exe [--frames N] [--width W] [--height H]
-//   --frames N   exit after N presented frames (default 0: run until the window is closed)
+// Usage: sample_cube.exe [--frames N] [--width W] [--height H] [--stall-ms MS]
+//   --frames N     exit after N presented frames (default 0: run until the window is closed)
+//   --stall-ms MS  pause once for MS milliseconds after the first frame (simulates an idle app)
 // Exit codes: 0 success, 1 device creation failed, 2 resource setup failed, 3 Present failed.
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -35,22 +36,25 @@ struct Options {
     int frames = 0;
     UINT width = 640;
     UINT height = 480;
+    int stall_ms = 0;
 };
 
 bool ParseArgs(int argc, char** argv, Options& opt) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if ((arg == "--frames" || arg == "--width" || arg == "--height") && i + 1 < argc) {
+        if ((arg == "--frames" || arg == "--width" || arg == "--height" || arg == "--stall-ms") && i + 1 < argc) {
             const int value = std::atoi(argv[++i]);
-            if (value < 0 || (arg != "--frames" && (value < 16 || value > 4096))) {
+            const bool is_size = (arg == "--width" || arg == "--height");
+            if (value < 0 || (is_size && (value < 16 || value > 4096))) {
                 std::fprintf(stderr, "[Sample] Invalid value for %s\n", arg.c_str());
                 return false;
             }
             if (arg == "--frames") opt.frames = value;
+            else if (arg == "--stall-ms") opt.stall_ms = value;
             else if (arg == "--width") opt.width = static_cast<UINT>(value);
             else opt.height = static_cast<UINT>(value);
         } else {
-            std::fprintf(stderr, "usage: %s [--frames N] [--width W] [--height H]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--frames N] [--width W] [--height H] [--stall-ms MS]\n", argv[0]);
             return false;
         }
     }
@@ -282,6 +286,16 @@ int main(int argc, char** argv) {
             break;
         }
         ++presented;
+
+        if (presented == 1 && opt.stall_ms > 0) {
+            // Stay idle without rendering, but keep the window responsive.
+            const auto stall_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(opt.stall_ms);
+            while (std::chrono::steady_clock::now() < stall_end) {
+                MSG msg;
+                while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
+                Sleep(50);
+            }
+        }
     }
 
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();

@@ -74,6 +74,7 @@ public:
     SOCKET Release() noexcept;
 
     bool SetTimeouts(int send_timeout_ms, int recv_timeout_ms);
+    bool EnableKeepAlive(unsigned long idle_ms, unsigned long interval_ms);
     bool SetNonBlocking(bool non_blocking);
 
     std::string GetPeerAddress() const;

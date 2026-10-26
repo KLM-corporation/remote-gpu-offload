@@ -68,9 +68,12 @@ def build(build_dir):
     return True
 
 
-def start_server(server_exe, port, log_path):
+def start_server(server_exe, port, log_path, single_session=True):
     log = open(log_path, "w", encoding="utf-8", errors="replace")
-    proc = subprocess.Popen([str(server_exe), "--port", str(port), "--bind", "127.0.0.1", "--single-session"],
+    cmd = [str(server_exe), "--port", str(port), "--bind", "127.0.0.1"]
+    if single_session:
+        cmd.append("--single-session")
+    proc = subprocess.Popen(cmd,
                             cwd=server_exe.parent, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace")
     listening = threading.Event()

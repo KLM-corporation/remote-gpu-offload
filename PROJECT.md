@@ -80,7 +80,7 @@ Every feature identified during Phase 0 Survey is inventoried and assigned to an
 | M2 | Remote GPU Execution Server | Dedicated adapter selection, headless D3D11 device creation, server resource manager, command execution dispatcher, staging framebuffer readback, and server unit tests (`test_server.cpp`) | M1 | DONE |
 | M3 | Client Direct3D Interception & Presentation | Drop-in `d3d11.dll`/`dxgi.dll`, COM proxies (`ProxyDevice`, `ProxyContext`, `ProxySwapChain`), dynamic buffer shadow mapper, Win32 GDI zero-GPU presentation, and client proxy unit tests (`test_client_proxy.cpp`) | M1, M2 | DONE (`dxgi.dll` wrapper deferred) |
 | M4 | 3D Sample App & Automated Verification Suite | Standalone 3D dynamic textured mesh sample application (`sample_cube.exe`), automated loopback test runner (`run_loopback_test.py`), and mathematical pixel verifier (`verify_pixels.py`) | M1, M2, M3 | DONE |
-| M5 | E2E Integration, Hardening & Final Gate | Full end-to-end integration running client proxy with sample app against server on 127.0.0.1 for >= 60 frames, pixel verification, network disconnect test, and clean exit code 0 | M1, M2, M3, M4 | PLANNED |
+| M5 | E2E Integration, Hardening & Final Gate | Full end-to-end integration running client proxy with sample app against server on 127.0.0.1 for >= 60 frames, pixel verification, network disconnect test, and clean exit code 0 | M1, M2, M3, M4 | DONE |
 
 ---
 
@@ -252,3 +252,12 @@ remote_gpu_offload/
   ```
   `--build` compiles the server, proxy DLL and sample first. Artifacts (server/client logs, `last_frame.bmp`/`.png`, `pixel_metrics.json`) go to `build/loopback_artifacts/`.
   Pixel check alone: `python tests/verify_pixels.py <frame.bmp> [--png out.png] [--json out.json]` (exit code 0 = pass, 1 = criteria failed, 2 = unreadable frame).
+- **Network Fault Tests** (no server, server killed, client killed, 15 s idle client, 6-session memory check):
+  ```powershell
+  python scripts/run_fault_tests.py [--only server_killed client_killed ...]
+  ```
+- **M5 Final Gate** (build + all unit, proxy, loopback and fault tests; exit code 0 = pass):
+  ```powershell
+  python scripts/run_final_gate.py
+  ```
+  Server sessions use no receive timeout (an idle client is legitimate) and TCP keepalive (5 s, then 1 s probes) to detect silently dropped peers. A session is reported `Normal` only when the client sent `OP_SHUTDOWN`.

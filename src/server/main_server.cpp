@@ -168,6 +168,13 @@ int main(int argc, char* argv[]) {
         std::cout << "\n[Server] Client connection #" << session_counter << " accepted from "
                   << client_sock->GetPeerAddress() << ":" << client_sock->GetPeerPort() << std::endl;
 
+        // A client may legitimately stay idle (minimised window, level loading), so the session
+        // must not end on a receive timeout. TCP keepalive detects peers that silently vanished.
+        client_sock->SetTimeouts(10000, 0);
+        if (!client_sock->EnableKeepAlive(5000, 1000)) {
+            std::cerr << "[Server] Warning: TCP keepalive could not be enabled for this session." << std::endl;
+        }
+
         // Instantiate ServerDispatcher for this client session
         ServerDispatcher dispatcher(gpu);
 

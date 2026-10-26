@@ -91,8 +91,8 @@ bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket) {
 
     while (socket.IsValid()) {
         if (!socket.RecvPacket(header, payload)) {
-            // Socket disconnected or timeout reached
-            break;
+            // Peer vanished without OP_SHUTDOWN (process killed, network dropped, keepalive expired)
+            return false;
         }
 
         if (header.magic != RGPU_MAGIC) {
@@ -111,11 +111,11 @@ bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket) {
         }
 
         if (header.opcode == OP_SHUTDOWN) {
-            break;
+            return true; // graceful client-initiated end of session
         }
     }
 
-    return true;
+    return false;
 }
 
 bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t* payload, size_t payload_size, NetworkSocket* socket) {

@@ -576,6 +576,20 @@ bool NetworkSocket::SetTimeouts(int send_timeout_ms, int recv_timeout_ms) {
     return ok;
 }
 
+bool NetworkSocket::EnableKeepAlive(unsigned long idle_ms, unsigned long interval_ms) {
+    if (!IsValid()) {
+        return false;
+    }
+    // Windows sends 10 probes before declaring the peer dead, so detection takes
+    // roughly idle_ms + 10 * interval_ms on a silently dropped connection.
+    tcp_keepalive ka = {};
+    ka.onoff = 1;
+    ka.keepalivetime = idle_ms;
+    ka.keepaliveinterval = interval_ms;
+    DWORD bytes_returned = 0;
+    return WSAIoctl(m_socket, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &bytes_returned, nullptr, nullptr) == 0;
+}
+
 bool NetworkSocket::SetNonBlocking(bool non_blocking) {
     if (!IsValid()) {
         return false;
