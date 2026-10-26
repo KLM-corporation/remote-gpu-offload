@@ -1,4 +1,4 @@
-# BRIEFING — 2026-10-26T16:33:00Z
+# BRIEFING — 2026-10-26T16:40:40Z
 
 ## Mission
 Implement Milestone 1: Network Protocol & Transport Layer for Remote GPU Offloading (`protocol.h`, `transport.h`, `transport.cpp`, `test_transport.cpp`).
@@ -22,7 +22,7 @@ Implement Milestone 1: Network Protocol & Transport Layer for Remote GPU Offload
 
 ## Current Parent
 - Conversation ID: ed6dd465-ec42-4bab-b054-c76327c6c969
-- Updated: 2026-10-26T16:33:00Z
+- Updated: 2026-10-26T16:40:40Z
 
 ## Task Summary
 - **What to build**: Complete binary protocol header definitions (`protocol.h`), high-performance Winsock transport abstraction (`transport.h`, `transport.cpp`), and comprehensive transport unit tests (`test_transport.cpp`).
@@ -31,17 +31,25 @@ Implement Milestone 1: Network Protocol & Transport Layer for Remote GPU Offload
 - **Code layout**: `src/common/` and `tests/`.
 
 ## Key Decisions Made
-- [Initial]: Will read all explorer specifications and project documents thoroughly before writing code.
+- Implemented all 33 opcodes in `RgpuOpcode` and packed structs under `#pragma pack(push, 1)`.
+- `PacketHeader` verified to 16 bytes with standard layout and trivial copyability.
+- Added both `GetRawSocket()` and `GetSocket()` accessor aliases to `NetworkSocket`.
+- Configured 16 MB `SO_SNDBUF` and `SO_RCVBUF`, `TCP_NODELAY`, and `SIO_LOOPBACK_FAST_PATH`.
+- Unit test suite covers 5 suites (packing & constants, struct round-trips, loopback connection & socket options, 4 MB payload transfer & 50-packet burst, error handling & disconnection recovery).
 
 ## Change Tracker
-- **Files modified**: None yet.
-- **Build status**: Not built yet.
+- **Files modified**:
+  - `src/common/protocol.h`: Complete 16-byte fixed header, all 33 opcodes, flags, and all payload structs.
+  - `src/common/transport.h`: NetworkSocket RAII wrapper declaration and network lifecycle management.
+  - `src/common/transport.cpp`: Winsock socket implementation, fast loopback, 16MB buffers, exact framing, and error handling.
+  - `tests/test_transport.cpp`: 5 test suites with 963 assertions covering all M1 requirements.
+- **Build status**: Pass (clang++ -std=c++17 -Wall -Wextra -Wpedantic -O2, exit code 0).
 - **Pending issues**: None.
 
 ## Quality Status
-- **Build/test result**: Not run yet.
-- **Lint status**: Clean.
-- **Tests added/modified**: Pending test_transport.cpp creation.
+- **Build/test result**: Pass (963/963 assertions passed, 0 failures, exit code 0).
+- **Lint status**: Clean (compiled with -Wall -Wextra -Wpedantic without warnings).
+- **Tests added/modified**: `tests/test_transport.cpp` added (963 assertions across 5 suites).
 
 ## Loaded Skills
 - None specified.
