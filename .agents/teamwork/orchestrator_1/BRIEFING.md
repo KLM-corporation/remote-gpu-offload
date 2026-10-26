@@ -61,14 +61,15 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | challenger_m1_1 | teamwork_preview_challenger | Milestone 1: Stress test disconnects & malformed packets | completed | f0b049dc-d478-4f43-a989-1690f8f26e55 |
 | challenger_m1_2 | teamwork_preview_challenger | Milestone 1: Throughput benchmark & 16 MB transfers | completed | 6108eae6-4d41-4c00-b86f-908fe3bd80c4 |
 | auditor_m1_1 | teamwork_preview_auditor | Milestone 1: Forensic integrity verification | completed | cb98dacf-f7be-4a50-bf0e-142ac057c921 |
-| explorer_m2_1 | teamwork_preview_explorer | Milestone 2: GPU Device & Readback Spec | in-progress | 1ef135a0-b785-41b0-aeae-f0cf2e4a5131 |
-| explorer_m2_2 | teamwork_preview_explorer | Milestone 2: Server Dispatcher Spec | in-progress | 2dc0665d-b819-4974-8986-e11a5529263e |
-| explorer_m2_3 | teamwork_preview_explorer | Milestone 2: Server Main & Unit Test Spec | in-progress | 9d660238-dcc3-4b4a-921e-dde079778b39 |
+| explorer_m2_1 | teamwork_preview_explorer | Milestone 2: GPU Device & Readback Spec | completed | 1ef135a0-b785-41b0-aeae-f0cf2e4a5131 |
+| explorer_m2_2 | teamwork_preview_explorer | Milestone 2: Server Dispatcher Spec | completed | 2dc0665d-b819-4974-8986-e11a5529263e |
+| explorer_m2_3 | teamwork_preview_explorer | Milestone 2: Server Main & Unit Test Spec | completed | 9d660238-dcc3-4b4a-921e-dde079778b39 |
+| worker_m2_1 | teamwork_preview_worker | Milestone 2: Implement gpu_device, server_dispatcher, main_server, test_server | in-progress | 77646538-b318-4e6a-8b1b-cf838a8768f5 |
 
 ## Succession Status
-- Succession required: no
-- Spawn count: 15 / 16
-- Pending subagents: 1ef135a0-b785-41b0-aeae-f0cf2e4a5131, 2dc0665d-b819-4974-8986-e11a5529263e, 9d660238-dcc3-4b4a-921e-dde079778b39
+- Succession required: pending completion of worker_m2_1
+- Spawn count: 16 / 16
+- Pending subagents: 77646538-b318-4e6a-8b1b-cf838a8768f5
 - Predecessor: none
 - Successor: not yet spawned
 
