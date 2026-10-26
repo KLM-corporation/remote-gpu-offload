@@ -857,36 +857,52 @@ void Benchmark_AbruptDisconnection_Resilience() {
         auto pair = EstablishLoopbackPair();
         STRESS_ASSERT(pair.client.IsValid() && pair.server && pair.server->IsValid());
 
-        const size_t k32MB = 32 * 1024 * 1024;
-        std::vector<uint8_t> large_buf(k32MB, 0xCC);
+        const size_t k16MB = 16 * 1024 * 1024;
+        std::vector<uint8_t> frame_buf(k16MB, 0xCC);
 
-        std::atomic<bool> sender_completed{false};
-        std::atomic<bool> sender_result{true};
+        std::atomic<bool> sender_saw_error{false};
+        std::atomic<bool> sender_finished{false};
+        std::atomic<int> frames_sent{0};
 
         std::thread sender_thread([&]() {
-            RemoteGPU::PacketHeader hdr{};
-            hdr.magic = RemoteGPU::RGPU_MAGIC;
-            hdr.opcode = RemoteGPU::OP_FRAME_DATA;
-            hdr.sequence_id = 7003;
-            hdr.payload_length = static_cast<uint32_t>(k32MB);
-            sender_result = pair.client.SendPacket(hdr, large_buf.data());
-            sender_completed = true;
+            for (int i = 0; i < 20; ++i) { // 20 * 16 MB = 320 MB (far exceeds 32 MB total socket buffers)
+                RemoteGPU::PacketHeader hdr{};
+                hdr.magic = RemoteGPU::RGPU_MAGIC;
+                hdr.opcode = RemoteGPU::OP_FRAME_DATA;
+                hdr.sequence_id = 7003 + i;
+                hdr.payload_length = static_cast<uint32_t>(k16MB);
+                if (!pair.client.SendPacket(hdr, frame_buf.data())) {
+                    sender_saw_error = true;
+                    break;
+                }
+                frames_sent++;
+            }
+            sender_finished = true;
         });
 
-        // Receiver reads only the header and 64 KB, then terminates with RST
+        // Receiver reads only the header and 64 KB of the first frame
         RemoteGPU::PacketHeader rcv_hdr{};
         pair.server->RecvExact(&rcv_hdr, sizeof(rcv_hdr));
         std::vector<uint8_t> partial(65536);
         pair.server->RecvExact(partial.data(), 65536);
 
-        // Abortively close receiver with RST
+        // Abortively close receiver with hard RST
         linger sl{ 1, 0 };
         setsockopt(pair.server->GetSocket(), SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&sl), sizeof(sl));
         pair.server->Close();
 
         sender_thread.join();
-        STRESS_ASSERT_MSG(sender_completed.load(), "Sender unblocked promptly when receiver RST disconnected");
-        STRESS_ASSERT_MSG(!sender_result.load(), "SendPacket returned false upon remote RST");
+        STRESS_ASSERT_MSG(sender_finished.load(), "Sender unblocked promptly when receiver RST disconnected");
+        STRESS_ASSERT_MSG(sender_saw_error.load(), "Sender detected remote RST disconnection during transmission");
+
+        // Verify subsequent SendPacket immediately fails
+        RemoteGPU::PacketHeader post_hdr{};
+        post_hdr.magic = RemoteGPU::RGPU_MAGIC;
+        post_hdr.opcode = RemoteGPU::OP_PRESENT;
+        post_hdr.sequence_id = 9999;
+        post_hdr.payload_length = 0;
+        bool post_send = pair.client.SendPacket(post_hdr, nullptr);
+        STRESS_ASSERT_MSG(!post_send, "Subsequent SendPacket on reset connection returns false");
     }
 
     std::cout << "--- [4.5] Concurrency Stress & Deadlock Freedom under Abrupt Peer Drop ---" << std::endl;
