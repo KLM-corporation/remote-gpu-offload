@@ -771,6 +771,70 @@ static void Test_ServerDispatcher_ComputeBounds() {
 }
 
 // ----------------------------------------------------------------------------
+// Test Suite 7: Copy and PS UAV bounds (zero-trust). Direct3D does not bound-check
+// CopySubresourceRegion; out-of-range regions must never reach the driver.
+// ----------------------------------------------------------------------------
+static void Test_ServerDispatcher_CopyBounds() {
+    HostGpuDevice gpu;
+    TEST_ASSERT(gpu.InitializeDedicatedGpu());
+    ServerDispatcher dispatcher(gpu);
+
+    auto makeTexture = [&](uint32_t id, uint32_t size) {
+        CreateTexture2DPayload p = {};
+        p.res_id = id;
+        p.width = p.height = size;
+        p.mips = 1;
+        p.array_size = 1;
+        p.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        p.sample_count = 1;
+        p.usage = D3D11_USAGE_DEFAULT;
+        p.bind_flags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        PacketHeader h = {RGPU_MAGIC, OP_CREATE_TEXTURE2D, FLAG_NONE, 1, 0};
+        return dispatcher.DispatchCommand(h, reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+    };
+    TEST_ASSERT(makeTexture(901, 64));
+    TEST_ASSERT(makeTexture(902, 64));
+    TEST_ASSERT(makeTexture(903, 32));
+
+    PacketHeader rh = {RGPU_MAGIC, OP_COPY_SUBRESOURCE_REGION, FLAG_NONE, 2, 0};
+    auto region = [&](uint32_t dst, uint32_t dst_sub, uint32_t x, uint32_t y, uint32_t src, uint32_t src_sub, bool box, RgpuBox b) {
+        CopySubresourceRegionPayload p = {dst, dst_sub, x, y, 0, src, src_sub, box ? 1u : 0u, b};
+        return dispatcher.DispatchCommand(rh, reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+    };
+    TEST_ASSERT_MSG(!region(902, 0, 0, 0, 901, 0, true, {0, 0, 0, 65, 16, 1}), "source box wider than the texture rejected");
+    TEST_ASSERT_MSG(!region(902, 0, 60, 0, 901, 0, true, {0, 0, 0, 16, 16, 1}), "destination overflow rejected");
+    TEST_ASSERT_MSG(!region(903, 0, 0, 0, 901, 0, false, {}), "whole 64x64 source into a 32x32 destination rejected");
+    TEST_ASSERT_MSG(!region(902, 1, 0, 0, 901, 0, true, {0, 0, 0, 8, 8, 1}), "missing destination subresource rejected");
+    TEST_ASSERT_MSG(!region(902, 0, 0, 0, 901, 0, true, {8, 0, 0, 8, 8, 1}), "empty source box rejected");
+    TEST_ASSERT_MSG(region(902, 0, 48, 48, 901, 0, true, {0, 0, 0, 16, 16, 1}), "in-bounds region copy accepted");
+
+    PacketHeader ch = {RGPU_MAGIC, OP_COPY_RESOURCE, FLAG_NONE, 3, 0};
+    CopyResourcePayload self = {901, 901};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(ch, reinterpret_cast<const uint8_t*>(&self), sizeof(self)), "copy onto itself rejected");
+    CopyResourcePayload sizes = {903, 901};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(ch, reinterpret_cast<const uint8_t*>(&sizes), sizeof(sizes)), "copy between different sizes rejected");
+    CopyResourcePayload ok = {902, 901};
+    TEST_ASSERT_MSG(dispatcher.DispatchCommand(ch, reinterpret_cast<const uint8_t*>(&ok), sizeof(ok)), "same-size CopyResource accepted");
+
+    PacketHeader oh = {RGPU_MAGIC, OP_OM_SET_RTVS_AND_UAVS, FLAG_NONE, 4, 0};
+    OMSetRtvsAndUavsPayload overlap = {};
+    overlap.num_rtvs = 2;
+    overlap.uav_start_slot = 1; // overlaps the RTV slots
+    overlap.num_uavs = 1;
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(oh, reinterpret_cast<const uint8_t*>(&overlap), sizeof(overlap)), "UAV slots overlapping RTVs rejected");
+    OMSetRtvsAndUavsPayload too_far = {};
+    too_far.num_rtvs = 0;
+    too_far.uav_start_slot = 60;
+    too_far.num_uavs = 8;
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(oh, reinterpret_cast<const uint8_t*>(&too_far), sizeof(too_far)), "UAV range past slot 64 rejected");
+    OMSetRtvsAndUavsPayload keep = {};
+    keep.num_rtvs = D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL;
+    keep.uav_start_slot = 1;
+    keep.num_uavs = 0;
+    TEST_ASSERT_MSG(dispatcher.DispatchCommand(oh, reinterpret_cast<const uint8_t*>(&keep), sizeof(keep)), "keep-render-targets binding accepted");
+}
+
+// ----------------------------------------------------------------------------
 // Test Main Entrypoint
 // ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
@@ -794,6 +858,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST_SUITE(Test_ServerDispatcher_DynamicBufferDiscard_And_Lifecycle);
     RUN_TEST_SUITE(Test_ServerDispatcher_TextureDataBounds);
     RUN_TEST_SUITE(Test_ServerDispatcher_ComputeBounds);
+    RUN_TEST_SUITE(Test_ServerDispatcher_CopyBounds);
 
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();

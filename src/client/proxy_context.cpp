@@ -227,10 +227,52 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetRenderTargets(UINT NumViews
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(
     UINT NumRTVs, ID3D11RenderTargetView* const* ppRenderTargetViews, ID3D11DepthStencilView* pDepthStencilView,
-    UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*) {
+    UINT UAVStartSlot, UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews, const UINT* pUAVInitialCounts) {
+    OMSetRtvsAndUavsPayload p = {};
+    p.num_rtvs = NumRTVs; // may be D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL
     if (NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
-        OMSetRenderTargets(NumRTVs, ppRenderTargetViews, pDepthStencilView);
+        p.num_rtvs = (std::min)(NumRTVs, static_cast<UINT>(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT));
+        for (UINT i = 0; i < p.num_rtvs; ++i) p.rtv_ids[i] = ppRenderTargetViews ? GetResourceIdFromCOM(ppRenderTargetViews[i]) : 0;
+        p.dsv_id = GetResourceIdFromCOM(pDepthStencilView);
     }
+    p.uav_start_slot = UAVStartSlot;
+    p.num_uavs = NumUAVs; // may be D3D11_KEEP_UNORDERED_ACCESS_VIEWS
+    if (NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS) {
+        p.num_uavs = (std::min)(NumUAVs, 8u);
+        for (UINT i = 0; i < p.num_uavs; ++i) {
+            p.uav_ids[i] = ppUnorderedAccessViews ? GetResourceIdFromCOM(ppUnorderedAccessViews[i]) : 0;
+            p.initial_counts[i] = pUAVInitialCounts ? pUAVInitialCounts[i] : 0xFFFFFFFFu;
+        }
+    }
+    Send(OP_OM_SET_RTVS_AND_UAVS, &p, sizeof(p));
+}
+
+// =============================================================================
+// Resource copies
+// =============================================================================
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyResource(ID3D11Resource* pDstResource, ID3D11Resource* pSrcResource) {
+    if (!pDstResource || !pSrcResource) return;
+    CopyResourcePayload p = {GetResourceIdFromCOM(pDstResource), GetResourceIdFromCOM(pSrcResource)};
+    Send(OP_COPY_RESOURCE, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopySubresourceRegion(ID3D11Resource* pDstResource, UINT DstSubresource,
+                                                                      UINT DstX, UINT DstY, UINT DstZ,
+                                                                      ID3D11Resource* pSrcResource, UINT SrcSubresource,
+                                                                      const D3D11_BOX* pSrcBox) {
+    if (!pDstResource || !pSrcResource) return;
+    CopySubresourceRegionPayload p = {};
+    p.dst_id = GetResourceIdFromCOM(pDstResource);
+    p.dst_subresource = DstSubresource;
+    p.dst_x = DstX;
+    p.dst_y = DstY;
+    p.dst_z = DstZ;
+    p.src_id = GetResourceIdFromCOM(pSrcResource);
+    p.src_subresource = SrcSubresource;
+    p.has_src_box = pSrcBox ? 1 : 0;
+    if (pSrcBox) p.src_box = {pSrcBox->left, pSrcBox->top, pSrcBox->front, pSrcBox->right, pSrcBox->bottom, pSrcBox->back};
+    Send(OP_COPY_SUBRESOURCE_REGION, &p, sizeof(p));
 }
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetBlendState(ID3D11BlendState* pBlendState, const FLOAT BlendFactor[4],

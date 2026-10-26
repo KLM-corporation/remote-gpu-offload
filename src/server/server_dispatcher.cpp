@@ -217,6 +217,8 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleCSSetCB(header, payload, payload_size);
         case OP_CS_SET_SAMPLER:
             return HandleCSSetSampler(header, payload, payload_size);
+        case OP_OM_SET_RTVS_AND_UAVS:
+            return HandleOMSetRtvsAndUavs(header, payload, payload_size);
 
         // 4. Updates & Draw Calls
         case OP_UPDATE_SUBRESOURCE:
@@ -240,6 +242,10 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
         case OP_CLEAR_UAV_UINT:
         case OP_CLEAR_UAV_FLOAT:
             return HandleClearUav(header, payload, payload_size);
+        case OP_COPY_RESOURCE:
+            return HandleCopyResource(header, payload, payload_size);
+        case OP_COPY_SUBRESOURCE_REGION:
+            return HandleCopySubresourceRegion(header, payload, payload_size);
 
         // 5. Presentation
         case OP_PRESENT:
@@ -1689,6 +1695,150 @@ bool ServerDispatcher::HandleDispatch(const PacketHeader& /*header*/, const uint
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
     context->Dispatch(p->thread_group_x, p->thread_group_y, p->thread_group_z);
+    return true;
+}
+
+// =============================================================================
+// Resource Copies & Pixel Shader UAVs
+// =============================================================================
+
+namespace {
+
+// Size of one subresource in copy units: bytes (x only) for buffers, texels for 2D textures.
+// Returns false for other resource kinds or an out-of-range subresource.
+bool SubresourceExtent(ID3D11Resource* res, uint32_t subresource, D3D11_RESOURCE_DIMENSION& dim,
+                       uint32_t& width, uint32_t& height) {
+    res->GetType(&dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        D3D11_BUFFER_DESC bd = {};
+        static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
+        width = bd.ByteWidth;
+        height = 1;
+        return subresource == 0;
+    }
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC td = {};
+        static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+        if (subresource >= td.MipLevels * td.ArraySize) return false;
+        const uint32_t mip = subresource % td.MipLevels;
+        width = MipSize(td.Width, mip);
+        height = MipSize(td.Height, mip);
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool ServerDispatcher::HandleCopyResource(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CopyResourcePayload)) return false;
+    const auto* p = reinterpret_cast<const CopyResourcePayload*>(payload);
+    Microsoft::WRL::ComPtr<ID3D11Resource> dst = m_resources.Get<ID3D11Resource>(p->dst_id);
+    Microsoft::WRL::ComPtr<ID3D11Resource> src = m_resources.Get<ID3D11Resource>(p->src_id);
+    if (!dst || !src || dst.Get() == src.Get()) {
+        std::cerr << "[ServerDispatcher] CopyResource: missing or identical resources (" << p->dst_id << ", " << p->src_id << ")" << std::endl;
+        return false;
+    }
+    D3D11_RESOURCE_DIMENSION dd = D3D11_RESOURCE_DIMENSION_UNKNOWN, sd = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    dst->GetType(&dd);
+    src->GetType(&sd);
+    bool same_shape = (dd == sd);
+    if (same_shape && dd == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        D3D11_BUFFER_DESC a = {}, b = {};
+        static_cast<ID3D11Buffer*>(dst.Get())->GetDesc(&a);
+        static_cast<ID3D11Buffer*>(src.Get())->GetDesc(&b);
+        same_shape = a.ByteWidth == b.ByteWidth;
+    } else if (same_shape && dd == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC a = {}, b = {};
+        static_cast<ID3D11Texture2D*>(dst.Get())->GetDesc(&a);
+        static_cast<ID3D11Texture2D*>(src.Get())->GetDesc(&b);
+        same_shape = a.Width == b.Width && a.Height == b.Height && a.MipLevels == b.MipLevels &&
+                     a.ArraySize == b.ArraySize && a.SampleDesc.Count == b.SampleDesc.Count;
+    }
+    if (!same_shape) {
+        std::cerr << "[ServerDispatcher] CopyResource: resources differ in type or size" << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    context->CopyResource(dst.Get(), src.Get());
+    return true;
+}
+
+bool ServerDispatcher::HandleCopySubresourceRegion(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CopySubresourceRegionPayload)) return false;
+    const auto* p = reinterpret_cast<const CopySubresourceRegionPayload*>(payload);
+    Microsoft::WRL::ComPtr<ID3D11Resource> dst = m_resources.Get<ID3D11Resource>(p->dst_id);
+    Microsoft::WRL::ComPtr<ID3D11Resource> src = m_resources.Get<ID3D11Resource>(p->src_id);
+    if (!dst || !src) {
+        std::cerr << "[ServerDispatcher] CopySubresourceRegion: resource not found" << std::endl;
+        return false;
+    }
+
+    // Direct3D does not bound-check the region: an out-of-range copy is undefined behaviour in
+    // the driver, so both sides are checked here.
+    D3D11_RESOURCE_DIMENSION dd, sd;
+    uint32_t dw = 0, dh = 0, sw = 0, sh = 0;
+    if (!SubresourceExtent(dst.Get(), p->dst_subresource, dd, dw, dh) ||
+        !SubresourceExtent(src.Get(), p->src_subresource, sd, sw, sh) || dd != sd) {
+        std::cerr << "[ServerDispatcher] CopySubresourceRegion: unsupported or mismatched subresources" << std::endl;
+        return false;
+    }
+    D3D11_BOX box = {0, 0, 0, sw, sh, 1};
+    if (p->has_src_box) {
+        box = {p->src_box.left, p->src_box.top, p->src_box.front, p->src_box.right, p->src_box.bottom, p->src_box.back};
+    }
+    const bool box_ok = box.left < box.right && box.right <= sw && box.top < box.bottom && box.bottom <= sh &&
+                        box.front == 0 && box.back == 1;
+    const bool dst_ok = p->dst_z == 0 && static_cast<uint64_t>(p->dst_x) + (box.right - box.left) <= dw &&
+                        static_cast<uint64_t>(p->dst_y) + (box.bottom - box.top) <= dh;
+    if (!box_ok || !dst_ok) {
+        std::cerr << "[ServerDispatcher] CopySubresourceRegion: region out of bounds" << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    context->CopySubresourceRegion(dst.Get(), p->dst_subresource, p->dst_x, p->dst_y, p->dst_z, src.Get(),
+                                   p->src_subresource, p->has_src_box ? &box : nullptr);
+    return true;
+}
+
+bool ServerDispatcher::HandleOMSetRtvsAndUavs(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(OMSetRtvsAndUavsPayload)) return false;
+    const auto* p = reinterpret_cast<const OMSetRtvsAndUavsPayload*>(payload);
+    const bool keep_rtvs = p->num_rtvs == D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL;
+    const bool keep_uavs = p->num_uavs == D3D11_KEEP_UNORDERED_ACCESS_VIEWS;
+    if ((!keep_rtvs && p->num_rtvs > D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) ||
+        (!keep_uavs && (p->num_uavs > 8 || p->uav_start_slot > D3D11_1_UAV_SLOT_COUNT - p->num_uavs ||
+                        (!keep_rtvs && p->num_uavs > 0 && p->uav_start_slot < p->num_rtvs)))) {
+        std::cerr << "[ServerDispatcher] OMSetRtvsAndUavs: invalid slots (rtvs " << p->num_rtvs << ", uav start "
+                  << p->uav_start_slot << ", uavs " << p->num_uavs << ")" << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtvs[8];
+    ID3D11RenderTargetView* raw_rtvs[8] = {};
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
+    if (!keep_rtvs) {
+        for (uint32_t i = 0; i < p->num_rtvs; ++i) {
+            rtvs[i] = m_resources.GetRTV(p->rtv_ids[i]);
+            raw_rtvs[i] = rtvs[i].Get();
+        }
+        dsv = m_resources.GetDSV(p->dsv_id);
+    }
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uavs[8];
+    ID3D11UnorderedAccessView* raw_uavs[8] = {};
+    if (!keep_uavs) {
+        for (uint32_t i = 0; i < p->num_uavs; ++i) {
+            uavs[i] = m_resources.Get<ID3D11UnorderedAccessView>(p->uav_ids[i]);
+            raw_uavs[i] = uavs[i].Get();
+        }
+    }
+    context->OMSetRenderTargetsAndUnorderedAccessViews(p->num_rtvs, keep_rtvs ? nullptr : raw_rtvs, dsv.Get(),
+                                                       p->uav_start_slot, p->num_uavs, keep_uavs ? nullptr : raw_uavs,
+                                                       keep_uavs ? nullptr : p->initial_counts);
     return true;
 }
 

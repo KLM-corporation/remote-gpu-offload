@@ -12,8 +12,6 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawAuto() {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawIndexedInstancedIndirect(ID3D11Buffer *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawInstancedIndirect(ID3D11Buffer *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DispatchIndirect(ID3D11Buffer *, UINT) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopySubresourceRegion(ID3D11Resource *, UINT, UINT, UINT, UINT, ID3D11Resource *, UINT, const D3D11_BOX *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyResource(ID3D11Resource *, ID3D11Resource *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyStructureCount(ID3D11Buffer *, UINT, ID3D11UnorderedAccessView *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GenerateMips(ID3D11ShaderResourceView *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::SetResourceMinLOD(ID3D11Resource *, FLOAT) {}

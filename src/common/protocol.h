@@ -100,6 +100,7 @@ enum RgpuOpcode : uint16_t {
     OP_CS_SET_UAV           = 0x0045, // Client -> Server: Bind Unordered Access View to CS slot
     OP_CS_SET_CB            = 0x0046, // Client -> Server: Bind Constant Buffer to CS slot
     OP_CS_SET_SAMPLER       = 0x0047, // Client -> Server: Bind Sampler State to CS slot
+    OP_OM_SET_RTVS_AND_UAVS = 0x0048, // Client -> Server: OMSetRenderTargetsAndUnorderedAccessViews
 
     // 4. Updates & Draw Calls (0x0050 - 0x006F)
     OP_UPDATE_SUBRESOURCE   = 0x0050, // Client -> Server: Update subresource memory
@@ -113,6 +114,8 @@ enum RgpuOpcode : uint16_t {
     OP_DISPATCH             = 0x0058, // Client -> Server: Run the bound compute shader
     OP_CLEAR_UAV_UINT       = 0x0059, // Client -> Server: ClearUnorderedAccessViewUint
     OP_CLEAR_UAV_FLOAT      = 0x005A, // Client -> Server: ClearUnorderedAccessViewFloat
+    OP_COPY_RESOURCE        = 0x005B, // Client -> Server: CopyResource
+    OP_COPY_SUBRESOURCE_REGION = 0x005C, // Client -> Server: CopySubresourceRegion
 
     // 5. Presentation & Streaming (0x0070 - 0x007F)
     OP_PRESENT              = 0x0070, // Client -> Server: End-of-frame present & readback trigger
@@ -369,6 +372,18 @@ struct CSSetUavPayload {
     uint32_t initial_count;       // Append/consume counter (0xFFFFFFFF keeps the current value)
 };
 
+// num_rtvs / num_uavs may be D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL /
+// D3D11_KEEP_UNORDERED_ACCESS_VIEWS (0xFFFFFFFF) to leave that half of the binding unchanged.
+struct OMSetRtvsAndUavsPayload {
+    uint32_t num_rtvs;
+    uint32_t rtv_ids[8];
+    uint32_t dsv_id;
+    uint32_t uav_start_slot;      // UAV slots share the RTV slot range: start >= num_rtvs
+    uint32_t num_uavs;
+    uint32_t uav_ids[8];
+    uint32_t initial_counts[8];   // 0xFFFFFFFF keeps the current append/consume counter
+};
+
 struct OMSetBlendStatePayload {
     uint32_t res_id;              // Blend State ID (0: default state)
     float    blend_factor[4];
@@ -520,6 +535,23 @@ struct ClearUavPayload {
     uint32_t values[4];           // UINT values, or the bit patterns of the 4 floats
 };
 
+struct CopyResourcePayload {
+    uint32_t dst_id;
+    uint32_t src_id;
+};
+
+struct CopySubresourceRegionPayload {
+    uint32_t dst_id;
+    uint32_t dst_subresource;
+    uint32_t dst_x;               // Bytes for buffers, texels for textures
+    uint32_t dst_y;
+    uint32_t dst_z;
+    uint32_t src_id;
+    uint32_t src_subresource;
+    uint32_t has_src_box;         // 0: the whole source subresource
+    RgpuBox  src_box;
+};
+
 struct DrawInstancedPayload {
     uint32_t vertex_count_per_instance;
     uint32_t instance_count;
@@ -635,6 +667,9 @@ static_assert(sizeof(CreateUavPayload) == 28);
 static_assert(sizeof(CSSetUavPayload) == 12);
 static_assert(sizeof(DispatchPayload) == 12);
 static_assert(sizeof(ClearUavPayload) == 20);
+static_assert(sizeof(OMSetRtvsAndUavsPayload) == 112);
+static_assert(sizeof(CopyResourcePayload) == 8);
+static_assert(sizeof(CopySubresourceRegionPayload) == 56);
 
 static_assert(sizeof(PresentPayload) == 20);
 static_assert(sizeof(FrameDataPayload) == 32);

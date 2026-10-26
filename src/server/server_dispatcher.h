@@ -188,6 +188,9 @@ private:
     bool HandleCSSetSampler(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleDispatch(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleClearUav(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCopyResource(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCopySubresourceRegion(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleOMSetRtvsAndUavs(const PacketHeader& header, const uint8_t* payload, size_t size);
 
     // Fixed-function state handlers
     bool HandleCreateBlendState(const PacketHeader& header, const uint8_t* payload, size_t size);
