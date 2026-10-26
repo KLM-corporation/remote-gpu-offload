@@ -232,7 +232,15 @@ remote_gpu_offload/
   ```
 - **Build Client Proxy DLLs**:
   ```powershell
-  clang++ -shared -std=c++17 -O2 -Isrc/common -Isrc/client src/common/transport.cpp src/client/presentation.cpp src/client/proxy_device.cpp src/client/proxy_context.cpp src/client/proxy_swapchain.cpp src/client/d3d11_wrapper.cpp src/client/dxgi_wrapper.cpp -o build/d3d11.dll -lws2_32 -lgdi32
+  clang++ -shared -static -std=c++17 -O2 -Isrc/common -Isrc/client src/common/transport.cpp src/client/presentation.cpp src/client/proxy_device.cpp src/client/proxy_context.cpp src/client/proxy_swapchain.cpp src/client/d3d11_wrapper.cpp src/client/d3d11.def -o build/client/d3d11.dll -lws2_32 -lgdi32 -luuid -ldxguid
+  ```
+  The proxy DLL must live in `build/client/`, never next to `server.exe`: Windows loads a `d3d11.dll` from the executable's folder first, so the server would load the proxy instead of the real driver.
+  `src/client/generated/*.inc` is produced by `python tools/gen_context_stubs.py <llvm-mingw>/include/d3d11.h src/client/generated`.
+  Server address for the proxy: `RGPU_SERVER` (default `127.0.0.1`) and `RGPU_PORT` (default `48888`). `RGPU_CAPTURE_FILE=<path.bmp>` saves the last presented frame.
+- **Client Proxy End-to-End Test** (server must be running):
+  ```powershell
+  clang++ -std=c++17 -O2 tests/test_client_proxy.cpp -o build/test_client_proxy.exe -ld3dcompiler -luser32 -lgdi32 -ldxguid
+  build/test_client_proxy.exe build/client/d3d11.dll 60
   ```
 - **Build 3D Sample App**:
   ```powershell

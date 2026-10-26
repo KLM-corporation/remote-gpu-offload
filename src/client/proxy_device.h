@@ -79,15 +79,9 @@ public:
     // =========================================================================
     // IDXGIObject Methods
     // =========================================================================
-    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID Name, UINT DataSize, const void *pData) override;
-    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID Name, const IUnknown *pUnknown) override;
-    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID Name, UINT *pDataSize, void *pData) override;
+    // SetPrivateData / SetPrivateDataInterface / GetPrivateData share signatures with
+    // ID3D11Device and are implemented once below (single override covers both bases).
     HRESULT STDMETHODCALLTYPE GetParent(REFIID riid, void **ppParent) override;
-
-    // =========================================================================
-    // IDXGIDeviceSubObject Methods
-    // =========================================================================
-    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void **ppDevice) override;
 
     // =========================================================================
     // IDXGIDevice Methods

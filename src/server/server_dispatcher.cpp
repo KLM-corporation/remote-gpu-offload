@@ -1120,12 +1120,11 @@ bool ServerDispatcher::HandleOMSetRenderTargets(const PacketHeader& /*header*/, 
         rtv = m_gpuDevice.GetRenderTargetView();
     }
 
+    // dsv_id == 0 means "no depth buffer", exactly like a null DSV in D3D11. Falling back to the
+    // host depth buffer here would depth-test against a buffer the client never clears.
     Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
     if (p->dsv_id != 0) {
         dsv = m_resources.GetDSV(p->dsv_id);
-    }
-    if (!dsv) {
-        dsv = m_gpuDevice.GetDepthStencilView();
     }
 
     ID3D11RenderTargetView* p_rtv = rtv.Get();
