@@ -202,6 +202,8 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandlePresent(header, payload, payload_size, socket);
         case OP_FRAME_DATA:
             return true;
+        case OP_RESIZE_BUFFERS:
+            return HandleResizeBuffers(header, payload, payload_size);
 
         default:
             std::cerr << "[ServerDispatcher] Unhandled opcode: 0x"
@@ -1328,8 +1330,30 @@ bool ServerDispatcher::HandleDrawIndexed(const PacketHeader& /*header*/, const u
 }
 
 // =============================================================================
-// Presentation Handler
+// Presentation Handlers
 // =============================================================================
+
+bool ServerDispatcher::HandleResizeBuffers(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(ResizeBuffersPayload)) {
+        std::cerr << "[ServerDispatcher] ResizeBuffers payload too small: " << size << std::endl;
+        return false;
+    }
+    const auto* p = reinterpret_cast<const ResizeBuffersPayload*>(payload);
+    if (p->width == 0 || p->width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        p->height == 0 || p->height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+        std::cerr << "[ServerDispatcher] ResizeBuffers: invalid size " << p->width << "x" << p->height << std::endl;
+        return false;
+    }
+    if (!m_gpuDevice.CreateOffscreenTargets(p->width, p->height)) {
+        std::cerr << "[ServerDispatcher] ResizeBuffers: failed to recreate targets at "
+                  << p->width << "x" << p->height << std::endl;
+        return false;
+    }
+    m_frameWidth = p->width;
+    m_frameHeight = p->height;
+    m_previousFrame.clear(); // next frame is a key frame
+    return true;
+}
 
 bool ServerDispatcher::HandlePresent(const PacketHeader& header, const uint8_t* payload, size_t size, NetworkSocket* socket) {
     if (size < sizeof(PresentPayload)) {

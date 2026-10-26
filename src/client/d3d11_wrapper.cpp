@@ -2,6 +2,7 @@
 // Server address: RGPU_SERVER (default 127.0.0.1), port: RGPU_PORT (default 48888).
 
 #include "proxy_device.h"
+#include "proxy_dxgi.h"
 
 #include <cstdlib>
 
@@ -51,6 +52,17 @@ HRESULT WINAPI D3D11CreateDevice(
     D3D_FEATURE_LEVEL* pFeatureLevel, ID3D11DeviceContext** ppImmediateContext) {
     return D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
                                          SDKVersion, nullptr, nullptr, ppDevice, pFeatureLevel, ppImmediateContext);
+}
+
+// Backs CreateDXGIFactory/1/2 of the companion dxgi.dll (src/client/dxgi_wrapper.cpp), so that
+// factories and devices come from this one module.
+HRESULT WINAPI RgpuCreateDXGIFactory(REFIID riid, void** ppFactory) {
+    if (!ppFactory) return E_INVALIDARG;
+    *ppFactory = nullptr;
+    auto* factory = new ProxyDXGIFactory(QueryRemoteAdapter(ServerHost(), ServerPort()));
+    HRESULT hr = factory->QueryInterface(riid, ppFactory);
+    factory->Release();
+    return hr;
 }
 
 } // extern "C"

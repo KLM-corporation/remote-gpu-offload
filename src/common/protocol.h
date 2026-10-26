@@ -94,7 +94,8 @@ enum RgpuOpcode : uint16_t {
 
     // 5. Presentation & Streaming (0x0070 - 0x007F)
     OP_PRESENT              = 0x0070, // Client -> Server: End-of-frame present & readback trigger
-    OP_FRAME_DATA           = 0x0071  // Server -> Client: Return rendered framebuffer pixels
+    OP_FRAME_DATA           = 0x0071, // Server -> Client: Return rendered framebuffer pixels
+    OP_RESIZE_BUFFERS       = 0x0072  // Client -> Server: Recreate the host back buffer at a new size
 };
 
 #pragma pack(push, 1)
@@ -384,6 +385,14 @@ struct FrameDataPayload {
     uint64_t frame_number;        // Monotonic server frame number matching PresentPayload
 };
 
+// Sent when a swap chain is created at, or resized to, a size other than the handshake size.
+// As with IDXGISwapChain::ResizeBuffers, views created on the old back buffer (resource_id 0)
+// keep pointing at the old texture; the client must recreate them.
+struct ResizeBuffersPayload {
+    uint32_t width;               // New back buffer width in pixels
+    uint32_t height;              // New back buffer height in pixels
+};
+
 // With FLAG_COMPRESSED, FrameDataPayload is followed by this header and the codec token stream;
 // FrameDataPayload::data_size then counts both. Without the flag, raw pixels follow as before.
 struct CompressedFrameHeader {
@@ -441,6 +450,7 @@ static_assert(sizeof(DrawIndexedPayload) == 12);
 static_assert(sizeof(PresentPayload) == 20);
 static_assert(sizeof(FrameDataPayload) == 32);
 static_assert(sizeof(CompressedFrameHeader) == 12);
+static_assert(sizeof(ResizeBuffersPayload) == 8);
 
 } // namespace RemoteGPU
 

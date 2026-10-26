@@ -1,6 +1,7 @@
 #include "proxy_device.h"
 #include "proxy_context.h"
 #include "proxy_swapchain.h"
+#include "proxy_dxgi.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -127,7 +128,7 @@ bool SendWithBlob(ProxyD3D11Device* dev, uint16_t opcode, const void* fixed, siz
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11Device)) {
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11Device) || riid == IID_IProxyDevice) {
         *ppvObject = static_cast<ID3D11Device*>(this);
     } else if (riid == __uuidof(IDXGIObject) || riid == __uuidof(IDXGIDevice)) {
         *ppvObject = static_cast<IDXGIDevice*>(this);
@@ -162,8 +163,9 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::GetParent(REFIID, void** ppParent) {
 }
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::GetAdapter(IDXGIAdapter** pAdapter) {
-    if (pAdapter) *pAdapter = nullptr;
-    return E_NOTIMPL;
+    if (!pAdapter) return E_INVALIDARG;
+    *pAdapter = new ProxyDXGIAdapter(m_adapterInfo);
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateSurface(const DXGI_SURFACE_DESC*, UINT, DXGI_USAGE,
@@ -496,27 +498,59 @@ UINT STDMETHODCALLTYPE ProxyD3D11Device::GetExceptionMode() { return 0; }
 // Factory: connect, handshake, assemble device + context + swap chain
 // =============================================================================
 
+bool ProxyD3D11Device::ResizeRemoteTargets(uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0) return false;
+    if (width == m_targetWidth && height == m_targetHeight) return true;
+    ResizeBuffersPayload p = {width, height};
+    if (!SendCommand(OP_RESIZE_BUFFERS, &p, sizeof(p), FLAG_ONEWAY)) return false;
+    m_targetWidth = width;
+    m_targetHeight = height;
+    return true;
+}
+
 HRESULT ProxyD3D11Device::CreateProxyDeviceAndSwapChain(const char* host, uint16_t port,
                                                         const DXGI_SWAP_CHAIN_DESC* pSwapChainDesc,
                                                         IDXGISwapChain** ppSwapChain, ID3D11Device** ppDevice,
                                                         D3D_FEATURE_LEVEL* pFeatureLevel,
                                                         ID3D11DeviceContext** ppImmediateContext) {
+    DXGI_SWAP_CHAIN_DESC desc = {};
+    if (pSwapChainDesc) {
+        desc = *pSwapChainDesc;
+        ResolveSwapChainSize(desc.OutputWindow, desc.BufferDesc.Width, desc.BufferDesc.Height);
+    }
+
+    Microsoft::WRL::ComPtr<ProxyD3D11Device> device;
+    HRESULT hr = Connect(host, port, pSwapChainDesc ? desc.BufferDesc.Width : 800,
+                         pSwapChainDesc ? desc.BufferDesc.Height : 600, device.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    ProxyD3D11DeviceContext* context = device->GetProxyContext();
+
+    if (ppSwapChain && pSwapChainDesc) {
+        desc.BufferDesc.Width = device->GetTargetWidth();
+        desc.BufferDesc.Height = device->GetTargetHeight();
+        Microsoft::WRL::ComPtr<ProxyDXGISwapChain> sc;
+        sc.Attach(new ProxyDXGISwapChain(device.Get(), context, desc));
+        *ppSwapChain = sc.Detach();
+    }
+    if (pFeatureLevel) *pFeatureLevel = device->GetFeatureLevel();
+    if (ppImmediateContext) {
+        *ppImmediateContext = context;
+        context->AddRef();
+    }
+    if (ppDevice) *ppDevice = device.Detach();
+    return S_OK;
+}
+
+HRESULT ProxyD3D11Device::Connect(const char* host, uint16_t port, uint32_t width, uint32_t height,
+                                  ProxyD3D11Device** ppDevice) {
+    if (!ppDevice) return E_INVALIDARG;
+    *ppDevice = nullptr;
     if (!NetworkSocket::InitializeNetwork()) return E_FAIL;
 
     auto socket = std::make_shared<NetworkSocket>();
     if (!socket->Connect(host, port)) {
         std::cerr << "[RemoteGPU] Cannot connect to GPU server " << host << ":" << port << std::endl;
         return DXGI_ERROR_UNSUPPORTED;
-    }
-
-    uint32_t width = pSwapChainDesc ? pSwapChainDesc->BufferDesc.Width : 0;
-    uint32_t height = pSwapChainDesc ? pSwapChainDesc->BufferDesc.Height : 0;
-    if ((width == 0 || height == 0) && pSwapChainDesc && pSwapChainDesc->OutputWindow) {
-        RECT rc = {};
-        if (GetClientRect(pSwapChainDesc->OutputWindow, &rc)) {
-            width = static_cast<uint32_t>(rc.right - rc.left);
-            height = static_cast<uint32_t>(rc.bottom - rc.top);
-        }
     }
     if (width == 0 || height == 0) { width = 800; height = 600; }
 
@@ -552,28 +586,31 @@ HRESULT ProxyD3D11Device::CreateProxyDeviceAndSwapChain(const char* host, uint16
     device.Attach(new ProxyD3D11Device(socket, level));
     device->m_nextSequenceId = 2; // sequence 1 was consumed by the handshake
 
+    device->m_targetWidth = resp.frame_width;
+    device->m_targetHeight = resp.frame_height;
+    resp.adapter_desc[sizeof(resp.adapter_desc) - 1] = '\0';
+    device->m_adapterInfo.description = resp.adapter_desc;
+    device->m_adapterInfo.dedicated_vram = resp.dedicated_vram;
+    RememberRemoteAdapter(device->m_adapterInfo);
+
     Microsoft::WRL::ComPtr<ProxyD3D11DeviceContext> context;
     context.Attach(new ProxyD3D11DeviceContext(device.Get()));
     device->SetProxyContext(context);
 
-    if (ppSwapChain && pSwapChainDesc) {
-        DXGI_SWAP_CHAIN_DESC desc = *pSwapChainDesc;
-        desc.BufferDesc.Width = resp.frame_width;
-        desc.BufferDesc.Height = resp.frame_height;
-        Microsoft::WRL::ComPtr<ProxyDXGISwapChain> sc;
-        sc.Attach(new ProxyDXGISwapChain(device.Get(), context.Get(), desc));
-        *ppSwapChain = sc.Detach();
-    }
-    if (pFeatureLevel) *pFeatureLevel = level;
-    if (ppImmediateContext) {
-        *ppImmediateContext = context.Get();
-        context->AddRef();
-    }
-    if (ppDevice) {
-        *ppDevice = device.Get();
-        device->AddRef();
-    }
+    *ppDevice = device.Detach();
     return S_OK;
+}
+
+void ResolveSwapChainSize(HWND window, UINT& width, UINT& height) {
+    if ((width == 0 || height == 0) && window) {
+        RECT rc = {};
+        if (GetClientRect(window, &rc)) {
+            if (width == 0) width = static_cast<UINT>(rc.right - rc.left);
+            if (height == 0) height = static_cast<UINT>(rc.bottom - rc.top);
+        }
+    }
+    if (width == 0) width = 8;
+    if (height == 0) height = 8;
 }
 
 } // namespace RemoteGPU

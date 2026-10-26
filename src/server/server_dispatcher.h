@@ -171,7 +171,8 @@ private:
     bool HandleDraw(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleDrawIndexed(const PacketHeader& header, const uint8_t* payload, size_t size);
 
-    // Presentation handler
+    // Presentation handlers
+    bool HandleResizeBuffers(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandlePresent(const PacketHeader& header, const uint8_t* payload, size_t size, NetworkSocket* socket);
 
 private:

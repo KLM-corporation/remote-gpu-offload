@@ -29,6 +29,19 @@ namespace RemoteGPU {
 
 class ProxyD3D11DeviceContext;
 
+// {4B6E1C85-4E7B-4A1C-9E28-87C9E0D90002}: QueryInterface on any proxy device with this IID
+// returns the ProxyD3D11Device itself (as ID3D11Device*). The DXGI factory uses it to recognise
+// devices it can build swap chains for.
+static constexpr GUID IID_IProxyDevice = {
+    0x4b6e1c85, 0x4e7b, 0x4a1c, { 0x9e, 0x28, 0x87, 0xc9, 0xe0, 0xd9, 0x00, 0x02 }
+};
+
+// Remote adapter identity reported by the server at handshake.
+struct RemoteAdapterInfo {
+    std::string description = "RemoteGPU remote adapter";
+    uint64_t    dedicated_vram = 0;
+};
+
 /**
  * @brief COM Proxy implementation of ID3D11Device & IDXGIDevice.
  * Intercepts Direct3D 11 device calls, assigns monotonic 32-bit resource IDs,
@@ -57,6 +70,16 @@ public:
     std::shared_ptr<NetworkSocket> GetSocket() const noexcept { return m_socket; }
     ProxyD3D11DeviceContext* GetProxyContext() const noexcept;
     void SetProxyContext(Microsoft::WRL::ComPtr<ProxyD3D11DeviceContext> ctx);
+
+    const RemoteAdapterInfo& GetRemoteAdapter() const noexcept { return m_adapterInfo; }
+    uint32_t GetTargetWidth() const noexcept { return m_targetWidth; }
+    uint32_t GetTargetHeight() const noexcept { return m_targetHeight; }
+    // Makes the host back buffer width x height (OP_RESIZE_BUFFERS) if it is not already.
+    bool ResizeRemoteTargets(uint32_t width, uint32_t height);
+
+    // Connects to the server and performs the handshake; the host back buffer starts at
+    // width x height. Returns a device holding one reference, with its immediate context.
+    static HRESULT Connect(const char* host, uint16_t port, uint32_t width, uint32_t height, ProxyD3D11Device** ppDevice);
 
     // --- Static Factory Helper ---
     static HRESULT CreateProxyDeviceAndSwapChain(
@@ -299,9 +322,15 @@ private:
     volatile ULONG                 m_refCount{1};
     std::mutex                     m_socketMutex;
     bool                           m_deviceRemoved{false};
+    RemoteAdapterInfo              m_adapterInfo;
+    uint32_t                       m_targetWidth{0};
+    uint32_t                       m_targetHeight{0};
 
     Microsoft::WRL::ComPtr<ProxyD3D11DeviceContext> m_immediateContext;
 };
+
+// DXGI rule for a 0 width/height in a swap chain description: use the window's client area.
+void ResolveSwapChainSize(HWND window, UINT& width, UINT& height);
 
 // Implementations of inline ProxyResourceBase methods needing ProxyD3D11Device:
 inline void ProxyResourceBase::NotifyDestroy() {

@@ -52,20 +52,23 @@ ProxyDXGISwapChain::ProxyDXGISwapChain(ProxyD3D11Device* device, ProxyD3D11Devic
     : m_device(device), m_context(context), m_desc(desc) {
     m_device->AddRef();
     m_context->AddRef();
+    CreateBackBuffer();
+    m_presenter.SetForceBgraConversion(true);
+    m_presenter.Initialize(desc.OutputWindow, desc.BufferDesc.Width, desc.BufferDesc.Height);
+}
 
+void ProxyDXGISwapChain::CreateBackBuffer() {
+    if (m_backBuffer) m_backBuffer->Release();
     D3D11_TEXTURE2D_DESC tex = {};
-    tex.Width = desc.BufferDesc.Width;
-    tex.Height = desc.BufferDesc.Height;
+    tex.Width = m_desc.BufferDesc.Width;
+    tex.Height = m_desc.BufferDesc.Height;
     tex.MipLevels = 1;
     tex.ArraySize = 1;
     tex.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     tex.SampleDesc.Count = 1;
     tex.Usage = D3D11_USAGE_DEFAULT;
     tex.BindFlags = D3D11_BIND_RENDER_TARGET;
-    m_backBuffer = new ProxyTexture2D(0, tex, device); // res_id 0 == host offscreen target
-
-    m_presenter.SetForceBgraConversion(true);
-    m_presenter.Initialize(desc.OutputWindow, tex.Width, tex.Height);
+    m_backBuffer = new ProxyTexture2D(0, tex, m_device); // res_id 0 == host offscreen target
 }
 
 ProxyDXGISwapChain::~ProxyDXGISwapChain() {
@@ -87,8 +90,8 @@ ProxyDXGISwapChain::~ProxyDXGISwapChain() {
 HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;
     if (riid == __uuidof(IUnknown) || riid == __uuidof(IDXGIObject) || riid == __uuidof(IDXGIDeviceSubObject) ||
-        riid == __uuidof(IDXGISwapChain)) {
-        *ppvObject = static_cast<IDXGISwapChain*>(this);
+        riid == __uuidof(IDXGISwapChain) || riid == __uuidof(IDXGISwapChain1)) {
+        *ppvObject = static_cast<IDXGISwapChain1*>(this);
         AddRef();
         return S_OK;
     }
@@ -195,8 +198,17 @@ HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* pDes
     return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT, UINT) {
-    // The host render target size is fixed at handshake; GDI stretches to the window.
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
+                                                            DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
+    ResolveSwapChainSize(m_desc.OutputWindow, Width, Height);
+    if (!m_device->ResizeRemoteTargets(Width, Height)) return DXGI_ERROR_DEVICE_REMOVED;
+    if (BufferCount) m_desc.BufferCount = BufferCount;
+    if (NewFormat != DXGI_FORMAT_UNKNOWN) m_desc.BufferDesc.Format = NewFormat;
+    m_desc.BufferDesc.Width = Width;
+    m_desc.BufferDesc.Height = Height;
+    m_desc.Flags = SwapChainFlags;
+    CreateBackBuffer(); // views on the old back buffer must be recreated by the application
+    m_lastFrame.clear();
     return S_OK;
 }
 
@@ -214,6 +226,78 @@ HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetFrameStatistics(DXGI_FRAME_STAT
 HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetLastPresentCount(UINT* pLastPresentCount) {
     if (!pLastPresentCount) return E_INVALIDARG;
     *pLastPresentCount = static_cast<UINT>(m_frameNumber);
+    return S_OK;
+}
+
+// =============================================================================
+// IDXGISwapChain1
+// =============================================================================
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetDesc1(DXGI_SWAP_CHAIN_DESC1* pDesc) {
+    if (!pDesc) return E_INVALIDARG;
+    *pDesc = {};
+    pDesc->Width = m_desc.BufferDesc.Width;
+    pDesc->Height = m_desc.BufferDesc.Height;
+    pDesc->Format = m_desc.BufferDesc.Format;
+    pDesc->SampleDesc = m_desc.SampleDesc;
+    pDesc->BufferUsage = m_desc.BufferUsage;
+    pDesc->BufferCount = m_desc.BufferCount;
+    pDesc->Scaling = DXGI_SCALING_STRETCH;
+    pDesc->SwapEffect = m_desc.SwapEffect;
+    pDesc->AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+    pDesc->Flags = m_desc.Flags;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc) {
+    if (!pDesc) return E_INVALIDARG;
+    *pDesc = {};
+    pDesc->RefreshRate = m_desc.BufferDesc.RefreshRate;
+    pDesc->Windowed = TRUE;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetHwnd(HWND* pHwnd) {
+    if (!pHwnd) return E_INVALIDARG;
+    *pHwnd = m_desc.OutputWindow;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetCoreWindow(REFIID, void** ppUnk) {
+    if (ppUnk) *ppUnk = nullptr;
+    return DXGI_ERROR_INVALID_CALL;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS*) {
+    return Present(SyncInterval, PresentFlags); // dirty rectangles are an optimisation hint only
+}
+
+WINBOOL STDMETHODCALLTYPE ProxyDXGISwapChain::IsTemporaryMonoSupported() { return FALSE; }
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetRestrictToOutput(IDXGIOutput** ppRestrictToOutput) {
+    if (ppRestrictToOutput) *ppRestrictToOutput = nullptr;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::SetBackgroundColor(const DXGI_RGBA* pColor) {
+    if (!pColor) return E_INVALIDARG;
+    m_backgroundColor = *pColor;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetBackgroundColor(DXGI_RGBA* pColor) {
+    if (!pColor) return E_INVALIDARG;
+    *pColor = m_backgroundColor;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::SetRotation(DXGI_MODE_ROTATION Rotation) {
+    return Rotation == DXGI_MODE_ROTATION_IDENTITY ? S_OK : DXGI_ERROR_UNSUPPORTED;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetRotation(DXGI_MODE_ROTATION* pRotation) {
+    if (!pRotation) return E_INVALIDARG;
+    *pRotation = DXGI_MODE_ROTATION_IDENTITY;
     return S_OK;
 }
 

@@ -69,6 +69,7 @@ Every feature identified during Phase 0 Survey is inventoried and assigned to an
 | 16 | Loopback Test Runner | Automated Python/PowerShell test harness running server and client on 127.0.0.1, executing >= 60 frames, clean exit code 0 | M4 | Survey (R5) |
 | 17 | Programmatic Pixel Verifier | Mathematical validation analyzing captured frame: mean luminance, standard deviation, non-clear ratio, multi-color clusters | M4 | Survey (R5) |
 | 18 | E2E System Integration | Full integration of client proxy DLL with 3D sample app and remote server, verified over loopback with zero memory leaks | M5 | Acceptance Criteria |
+| 20 | DXGI Factory & Adapter Proxies | `IDXGIFactory2` / `IDXGIAdapter1` proxies (device `GetAdapter`, drop-in `dxgi.dll`), `IDXGISwapChain1`, `CreateSwapChainForHwnd`, real `ResizeBuffers` via `OP_RESIZE_BUFFERS` | Post-M5 | Real apps |
 | 19 | Frame Compression | Lossless `FRAME_CODEC_RLE_DELTA` (XOR prediction vs previous frame or left pixel, zero-run/literal tokens) negotiated with `CLIENT_FLAG_FRAME_COMPRESSION`; raw fallback when it would not save bytes | Post-M5 | Bandwidth |
 
 ---
@@ -168,6 +169,12 @@ Server: desktop with NVIDIA GeForce RTX 4070, wired Ethernet. Client: Lenovo lap
 - Two-machine LAN operation (acceptance criterion) verified; the captured frame passes `verify_pixels.py` and is byte-identical with and without compression.
 - Without compression the Wi-Fi link is saturated. With compression bandwidth is no longer the limit: the 1:1 Present round trip (one frame in flight) is, which frame pipelining would address.
 
+### 1d. Real-Application Compatibility
+- Test corpus: Microsoft's Direct3D 11 tutorials 02, 04, 05, 06, 07 (github.com/walbourn/directx-sdk-samples, MIT), unmodified. `python scripts/run_compat_tests.py --fetch` downloads them (~1.5 MB, sparse clone into `build/third_party`), builds them with `tests/compat/shim` (DirectXMath subset missing from LLVM-MinGW), runs each through the proxy and checks the last frame. All five render correctly.
+- `OP_RESIZE_BUFFERS` (0x0072, `ResizeBuffersPayload {width, height}`) recreates the host back buffer; sent when a swap chain is created at a size other than the handshake size and on `ResizeBuffers`. As in D3D11, views on the old back buffer must be recreated.
+- A factory created before any device (`CreateDXGIFactory*`) opens one short probe session to learn the remote adapter name and VRAM.
+- Not forwarded yet: blend / depth-stencil / rasterizer states (the host uses D3D11 defaults), texture mip chains and arrays in `CreateTexture2D` initial data, VS/GS/HS/DS/CS resources beyond constant buffers, instanced draws, multiple render targets, `ID3D11Device1`.
+
 ### 2. Transport Contract (`src/common/transport.h`)
 ```cpp
 class NetworkSocket {
@@ -226,6 +233,7 @@ remote_gpu_offload/
 │   │   ├── proxy_swapchain.cpp   # Frame receipt & presentation
 │   │   ├── presentation.h        # Zero-GPU Win32 GDI presentation
 │   │   ├── presentation.cpp      # SetDIBitsToDevice blit
+│   │   ├── proxy_dxgi.h/.cpp     # IDXGIFactory2 / IDXGIAdapter1 proxies
 │   │   ├── d3d11_wrapper.cpp     # D3D11CreateDevice[AndSwapChain] exports
 │   │   └── dxgi_wrapper.cpp      # CreateDXGIFactory[1/2] exports
 │   └── sample_app/
@@ -253,8 +261,10 @@ remote_gpu_offload/
   ```
 - **Build Client Proxy DLLs**:
   ```powershell
-  clang++ -shared -static -std=c++17 -O2 -Isrc/common -Isrc/client src/common/transport.cpp src/common/frame_codec.cpp src/client/presentation.cpp src/client/proxy_device.cpp src/client/proxy_context.cpp src/client/proxy_swapchain.cpp src/client/d3d11_wrapper.cpp src/client/d3d11.def -o build/client/d3d11.dll -lws2_32 -lgdi32 -luuid -ldxguid
+  clang++ -shared -static -std=c++17 -O2 -Isrc/common -Isrc/client src/common/transport.cpp src/common/frame_codec.cpp src/client/presentation.cpp src/client/proxy_device.cpp src/client/proxy_context.cpp src/client/proxy_swapchain.cpp src/client/proxy_dxgi.cpp src/client/d3d11_wrapper.cpp src/client/d3d11.def -o build/client/d3d11.dll -lws2_32 -lgdi32 -luuid -ldxguid
+  clang++ -shared -static -std=c++17 -O2 src/client/dxgi_wrapper.cpp src/client/dxgi.def -o build/client/dxgi.dll
   ```
+  Deploy both DLLs next to the application's .exe. `dxgi.dll` forwards `CreateDXGIFactory/1/2` to the `d3d11.dll` in its own folder.
   The proxy DLL must live in `build/client/`, never next to `server.exe`: Windows loads a `d3d11.dll` from the executable's folder first, so the server would load the proxy instead of the real driver.
   `src/client/generated/*.inc` is produced by `python tools/gen_context_stubs.py <llvm-mingw>/include/d3d11.h src/client/generated`.
   Server address for the proxy: `RGPU_SERVER` (default `127.0.0.1`) and `RGPU_PORT` (default `48888`). `RGPU_CAPTURE_FILE=<path.bmp>` saves the last presented frame.
@@ -276,6 +286,10 @@ remote_gpu_offload/
 - **Network Fault Tests** (no server, server killed, client killed, 15 s idle client, 6-session memory check):
   ```powershell
   python scripts/run_fault_tests.py [--only server_killed client_killed ...]
+  ```
+- **Real-Application Compatibility Tests** (Microsoft D3D11 tutorials through the proxy):
+  ```powershell
+  python scripts/run_compat_tests.py --fetch
   ```
 - **M5 Final Gate** (build + all unit, proxy, loopback and fault tests; exit code 0 = pass):
   ```powershell

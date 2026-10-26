@@ -32,9 +32,12 @@ BUILD_COMMANDS = [
      "-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler"],
     ["-shared", "-static", "-std=c++17", "-O2", "-Isrc/common", "-Isrc/client",
      "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/client/presentation.cpp", "src/client/proxy_device.cpp",
-     "src/client/proxy_context.cpp", "src/client/proxy_swapchain.cpp", "src/client/d3d11_wrapper.cpp",
+     "src/client/proxy_context.cpp", "src/client/proxy_swapchain.cpp", "src/client/proxy_dxgi.cpp",
+     "src/client/d3d11_wrapper.cpp",
      "src/client/d3d11.def", "-o", "{build}/client/d3d11.dll",
      "-lws2_32", "-lgdi32", "-luuid", "-ldxguid"],
+    ["-shared", "-static", "-std=c++17", "-O2", "src/client/dxgi_wrapper.cpp", "src/client/dxgi.def",
+     "-o", "{build}/client/dxgi.dll"],
     ["-std=c++17", "-O2", "-static", "-Isrc/sample_app", "src/sample_app/main_sample.cpp",
      "-o", "{build}/client/sample_cube.exe", "-ld3d11", "-ld3dcompiler", "-luser32", "-ldxguid"],
 ]
