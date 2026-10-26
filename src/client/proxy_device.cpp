@@ -559,12 +559,41 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateRasterizerState(const D3D11_RA
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture1D(const D3D11_TEXTURE1D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture1D**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture3D(const D3D11_TEXTURE3D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture3D**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateUnorderedAccessView(ID3D11Resource*, const D3D11_UNORDERED_ACCESS_VIEW_DESC*, ID3D11UnorderedAccessView**) { return E_NOTIMPL; }
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateUnorderedAccessView(ID3D11Resource* pResource,
+                                                                      const D3D11_UNORDERED_ACCESS_VIEW_DESC* pDesc,
+                                                                      ID3D11UnorderedAccessView** ppUAView) {
+    if (!pResource) return E_INVALIDARG;
+    if (!ppUAView) return S_FALSE;
+
+    CreateUavPayload p = {};
+    p.res_id = AllocateResourceId();
+    p.resource_id = GetResourceIdFromCOM(pResource);
+    if (pDesc) {
+        p.format = pDesc->Format;
+        p.view_dimension = pDesc->ViewDimension;
+        static_assert(sizeof(pDesc->Buffer) == sizeof(p.fields), "UAV union is three UINTs");
+        std::memcpy(p.fields, &pDesc->Buffer, sizeof(p.fields)); // the whole union, whatever the dimension
+    }
+    if (!SendCommand(OP_CREATE_UAV, &p, sizeof(p), FLAG_ONEWAY)) return DXGI_ERROR_DEVICE_REMOVED;
+    *ppUAView = new ProxyUnorderedAccessView(p.res_id, pResource, pDesc, this);
+    return S_OK;
+}
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateGeometryShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11GeometryShader**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateGeometryShaderWithStreamOutput(const void*, SIZE_T, const D3D11_SO_DECLARATION_ENTRY*, UINT, const UINT*, UINT, UINT, ID3D11ClassLinkage*, ID3D11GeometryShader**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateHullShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11HullShader**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateDomainShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11DomainShader**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateComputeShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11ComputeShader**) { return E_NOTIMPL; }
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateComputeShader(const void* pShaderBytecode, SIZE_T BytecodeLength,
+                                                                ID3D11ClassLinkage*, ID3D11ComputeShader** ppComputeShader) {
+    if (!pShaderBytecode || BytecodeLength == 0) return E_INVALIDARG;
+    if (!ppComputeShader) return S_FALSE;
+
+    const uint32_t id = AllocateResourceId();
+    CreateShaderPayload p = {id, static_cast<uint32_t>(BytecodeLength)};
+    if (!SendWithBlob(this, OP_CREATE_COMPUTE_SHADER, &p, sizeof(p), pShaderBytecode, BytecodeLength))
+        return DXGI_ERROR_DEVICE_REMOVED;
+    *ppComputeShader = new ProxyComputeShader(id, this);
+    return S_OK;
+}
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateClassLinkage(ID3D11ClassLinkage**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateQuery(const D3D11_QUERY_DESC*, ID3D11Query**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreatePredicate(const D3D11_QUERY_DESC*, ID3D11Predicate**) { return E_NOTIMPL; }

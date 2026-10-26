@@ -178,6 +178,17 @@ private:
     bool HandleVSSetSrv(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleVSSetSampler(const PacketHeader& header, const uint8_t* payload, size_t size);
 
+    // Compute shaders & unordered access views
+    bool HandleCreateComputeShader(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCreateUav(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCSSetShader(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCSSetSrv(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCSSetUav(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCSSetCB(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCSSetSampler(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleDispatch(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleClearUav(const PacketHeader& header, const uint8_t* payload, size_t size);
+
     // Fixed-function state handlers
     bool HandleCreateBlendState(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCreateDepthStencilState(const PacketHeader& header, const uint8_t* payload, size_t size);

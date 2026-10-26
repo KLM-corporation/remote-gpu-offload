@@ -11,13 +11,10 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::SOSetTargets(UINT, ID3D11Buffer 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawAuto() {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawIndexedInstancedIndirect(ID3D11Buffer *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawInstancedIndirect(ID3D11Buffer *, UINT) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Dispatch(UINT, UINT, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DispatchIndirect(ID3D11Buffer *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopySubresourceRegion(ID3D11Resource *, UINT, UINT, UINT, UINT, ID3D11Resource *, UINT, const D3D11_BOX *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyResource(ID3D11Resource *, ID3D11Resource *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyStructureCount(ID3D11Buffer *, UINT, ID3D11UnorderedAccessView *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView *, const UINT[4]) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView *, const FLOAT[4]) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GenerateMips(ID3D11ShaderResourceView *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::SetResourceMinLOD(ID3D11Resource *, FLOAT) {}
 FLOAT STDMETHODCALLTYPE ProxyD3D11DeviceContext::GetResourceMinLOD(ID3D11Resource *) { return 0; }
@@ -31,11 +28,6 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetShaderResources(UINT, UINT,
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetShader(ID3D11DomainShader *, ID3D11ClassInstance *const *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetSamplers(UINT, UINT, ID3D11SamplerState *const *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetConstantBuffers(UINT, UINT, ID3D11Buffer *const *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetShaderResources(UINT, UINT, ID3D11ShaderResourceView *const *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetUnorderedAccessViews(UINT, UINT, ID3D11UnorderedAccessView *const *, const UINT *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetShader(ID3D11ComputeShader *, ID3D11ClassInstance *const *, UINT) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetSamplers(UINT, UINT, ID3D11SamplerState *const *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetConstantBuffers(UINT, UINT, ID3D11Buffer *const *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::VSGetConstantBuffers(UINT, UINT, ID3D11Buffer **) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::PSGetShaderResources(UINT, UINT, ID3D11ShaderResourceView **) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::PSGetShader(ID3D11PixelShader **, ID3D11ClassInstance **, UINT *) {}

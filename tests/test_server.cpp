@@ -719,6 +719,58 @@ static void Test_ServerDispatcher_TextureDataBounds() {
 }
 
 // ----------------------------------------------------------------------------
+// Test Suite 6: Compute bounds (zero-trust). Out-of-range dispatch sizes, UAV dimensions
+// and slots must be rejected before they reach the driver.
+// ----------------------------------------------------------------------------
+static void Test_ServerDispatcher_ComputeBounds() {
+    HostGpuDevice gpu;
+    TEST_ASSERT(gpu.InitializeDedicatedGpu());
+    ServerDispatcher dispatcher(gpu);
+
+    PacketHeader dh = {RGPU_MAGIC, OP_DISPATCH, FLAG_NONE, 1, 0};
+    DispatchPayload too_big = {D3D11_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION + 1, 1, 1};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(dh, reinterpret_cast<const uint8_t*>(&too_big), sizeof(too_big)),
+                    "dispatch above 65535 groups rejected");
+    DispatchPayload no_shader = {1, 1, 1};
+    TEST_ASSERT_MSG(dispatcher.DispatchCommand(dh, reinterpret_cast<const uint8_t*>(&no_shader), sizeof(no_shader)),
+                    "dispatch with no shader bound is a harmless no-op");
+
+    // A buffer to build UAVs on.
+    CreateBufferPayload bp = {};
+    bp.res_id = 801;
+    bp.byte_width = 64;
+    bp.usage = D3D11_USAGE_DEFAULT;
+    bp.bind_flags = D3D11_BIND_UNORDERED_ACCESS;
+    bp.misc_flags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    PacketHeader bh = {RGPU_MAGIC, OP_CREATE_BUFFER, FLAG_NONE, 2, 0};
+    TEST_ASSERT(dispatcher.DispatchCommand(bh, reinterpret_cast<const uint8_t*>(&bp), sizeof(bp)));
+
+    PacketHeader uh = {RGPU_MAGIC, OP_CREATE_UAV, FLAG_NONE, 3, 0};
+    CreateUavPayload bad_dim = {802, 801, DXGI_FORMAT_R32_TYPELESS, 9, {0, 16, D3D11_BUFFER_UAV_FLAG_RAW}};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(uh, reinterpret_cast<const uint8_t*>(&bad_dim), sizeof(bad_dim)),
+                    "UAV with an unknown dimension rejected");
+    CreateUavPayload missing = {803, 999, DXGI_FORMAT_R32_TYPELESS, D3D11_UAV_DIMENSION_BUFFER, {0, 16, D3D11_BUFFER_UAV_FLAG_RAW}};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(uh, reinterpret_cast<const uint8_t*>(&missing), sizeof(missing)),
+                    "UAV on a missing resource rejected");
+    CreateUavPayload raw = {804, 801, DXGI_FORMAT_R32_TYPELESS, D3D11_UAV_DIMENSION_BUFFER, {0, 16, D3D11_BUFFER_UAV_FLAG_RAW}};
+    TEST_ASSERT_MSG(dispatcher.DispatchCommand(uh, reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)),
+                    "raw buffer UAV (BUFFER union carried verbatim) accepted");
+
+    PacketHeader sh = {RGPU_MAGIC, OP_CS_SET_UAV, FLAG_NONE, 4, 0};
+    CSSetUavPayload bad_slot = {D3D11_1_UAV_SLOT_COUNT, 804, 0xFFFFFFFFu};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(sh, reinterpret_cast<const uint8_t*>(&bad_slot), sizeof(bad_slot)),
+                    "UAV slot beyond the limit rejected");
+
+    PacketHeader ch = {RGPU_MAGIC, OP_CLEAR_UAV_UINT, FLAG_NONE, 5, 0};
+    ClearUavPayload clear_missing = {999, {0, 0, 0, 0}};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(ch, reinterpret_cast<const uint8_t*>(&clear_missing), sizeof(clear_missing)),
+                    "clearing a missing UAV rejected");
+    ClearUavPayload clear_raw = {804, {7, 7, 7, 7}};
+    TEST_ASSERT_MSG(dispatcher.DispatchCommand(ch, reinterpret_cast<const uint8_t*>(&clear_raw), sizeof(clear_raw)),
+                    "clearing an existing UAV accepted");
+}
+
+// ----------------------------------------------------------------------------
 // Test Main Entrypoint
 // ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
@@ -741,6 +793,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST_SUITE(Test_ServerDispatcher_LoopbackSyntheticPackets);
     RUN_TEST_SUITE(Test_ServerDispatcher_DynamicBufferDiscard_And_Lifecycle);
     RUN_TEST_SUITE(Test_ServerDispatcher_TextureDataBounds);
+    RUN_TEST_SUITE(Test_ServerDispatcher_ComputeBounds);
 
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();

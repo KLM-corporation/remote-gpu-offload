@@ -126,6 +126,69 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::VSSetSamplers(UINT StartSlot, UI
     }
 }
 
+// =============================================================================
+// Compute stage
+// =============================================================================
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetShader(ID3D11ComputeShader* pComputeShader, ID3D11ClassInstance* const*, UINT) {
+    VSSetShaderPayload p = {GetResourceIdFromCOM(pComputeShader)};
+    Send(OP_CS_SET_SHADER, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
+    for (UINT i = 0; i < NumViews; ++i) {
+        PSSetSrvPayload p = {StartSlot + i, ppShaderResourceViews ? GetResourceIdFromCOM(ppShaderResourceViews[i]) : 0};
+        Send(OP_CS_SET_SRV, &p, sizeof(p));
+    }
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetUnorderedAccessViews(UINT StartSlot, UINT NumUAVs,
+                                                                          ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
+                                                                          const UINT* pUAVInitialCounts) {
+    for (UINT i = 0; i < NumUAVs; ++i) {
+        CSSetUavPayload p = {StartSlot + i, ppUnorderedAccessViews ? GetResourceIdFromCOM(ppUnorderedAccessViews[i]) : 0,
+                             pUAVInitialCounts ? pUAVInitialCounts[i] : 0xFFFFFFFFu};
+        Send(OP_CS_SET_UAV, &p, sizeof(p));
+    }
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers) {
+    for (UINT i = 0; i < NumBuffers; ++i) {
+        VSSetConstantBufferPayload p = {StartSlot + i, ppConstantBuffers ? GetResourceIdFromCOM(ppConstantBuffers[i]) : 0};
+        Send(OP_CS_SET_CB, &p, sizeof(p));
+    }
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
+    for (UINT i = 0; i < NumSamplers; ++i) {
+        PSSetSamplerPayload p = {StartSlot + i, ppSamplers ? GetResourceIdFromCOM(ppSamplers[i]) : 0};
+        Send(OP_CS_SET_SAMPLER, &p, sizeof(p));
+    }
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Dispatch(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ) {
+    DispatchPayload p = {ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ};
+    Send(OP_DISPATCH, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* pUnorderedAccessView,
+                                                                             const UINT Values[4]) {
+    if (!pUnorderedAccessView || !Values) return;
+    ClearUavPayload p = {};
+    p.res_id = GetResourceIdFromCOM(pUnorderedAccessView);
+    std::memcpy(p.values, Values, sizeof(p.values));
+    Send(OP_CLEAR_UAV_UINT, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* pUnorderedAccessView,
+                                                                              const FLOAT Values[4]) {
+    if (!pUnorderedAccessView || !Values) return;
+    ClearUavPayload p = {};
+    p.res_id = GetResourceIdFromCOM(pUnorderedAccessView);
+    std::memcpy(p.values, Values, sizeof(p.values)); // float bit patterns
+    Send(OP_CLEAR_UAV_FLOAT, &p, sizeof(p));
+}
+
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::PSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
     for (UINT i = 0; i < NumSamplers; ++i) {
         PSSetSamplerPayload p = {StartSlot + i, ppSamplers ? GetResourceIdFromCOM(ppSamplers[i]) : 0};

@@ -161,6 +161,10 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleCreateDepthStencilState(header, payload, payload_size);
         case OP_CREATE_RASTERIZER_STATE:
             return HandleCreateRasterizerState(header, payload, payload_size);
+        case OP_CREATE_COMPUTE_SHADER:
+            return HandleCreateComputeShader(header, payload, payload_size);
+        case OP_CREATE_UAV:
+            return HandleCreateUav(header, payload, payload_size);
         case OP_DESTROY_RESOURCE:
             return HandleDestroyResource(header, payload, payload_size);
 
@@ -203,6 +207,16 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleVSSetSrv(header, payload, payload_size);
         case OP_VS_SET_SAMPLER:
             return HandleVSSetSampler(header, payload, payload_size);
+        case OP_CS_SET_SHADER:
+            return HandleCSSetShader(header, payload, payload_size);
+        case OP_CS_SET_SRV:
+            return HandleCSSetSrv(header, payload, payload_size);
+        case OP_CS_SET_UAV:
+            return HandleCSSetUav(header, payload, payload_size);
+        case OP_CS_SET_CB:
+            return HandleCSSetCB(header, payload, payload_size);
+        case OP_CS_SET_SAMPLER:
+            return HandleCSSetSampler(header, payload, payload_size);
 
         // 4. Updates & Draw Calls
         case OP_UPDATE_SUBRESOURCE:
@@ -221,6 +235,11 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleDrawInstanced(header, payload, payload_size);
         case OP_DRAW_INDEXED_INSTANCED:
             return HandleDrawIndexedInstanced(header, payload, payload_size);
+        case OP_DISPATCH:
+            return HandleDispatch(header, payload, payload_size);
+        case OP_CLEAR_UAV_UINT:
+        case OP_CLEAR_UAV_FLOAT:
+            return HandleClearUav(header, payload, payload_size);
 
         // 5. Presentation
         case OP_PRESENT:
@@ -1533,6 +1552,163 @@ bool ServerDispatcher::HandleVSSetSampler(const PacketHeader& /*header*/, const 
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler = m_resources.GetSamplerState(p->res_id);
     ID3D11SamplerState* p_sampler = sampler.Get();
     context->VSSetSamplers(p->slot, 1, &p_sampler);
+    return true;
+}
+
+// =============================================================================
+// Compute Shaders & Unordered Access Views
+// =============================================================================
+
+bool ServerDispatcher::HandleCreateComputeShader(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateShaderPayload)) return false;
+    const auto* p = reinterpret_cast<const CreateShaderPayload*>(payload);
+    if (p->res_id == 0 || p->bytecode_length == 0 || p->bytecode_length > 64 * 1024 * 1024 ||
+        p->bytecode_length > size - sizeof(CreateShaderPayload)) {
+        std::cerr << "[ServerDispatcher] CreateComputeShader: invalid res_id or bytecode length" << std::endl;
+        return false;
+    }
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> cs;
+    HRESULT hr = device->CreateComputeShader(payload + sizeof(CreateShaderPayload), p->bytecode_length, nullptr, &cs);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateComputeShader failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+    m_resources.Register(p->res_id, cs);
+    return true;
+}
+
+bool ServerDispatcher::HandleCreateUav(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateUavPayload)) return false;
+    const auto* p = reinterpret_cast<const CreateUavPayload*>(payload);
+    if (p->res_id == 0 || p->resource_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateUav: invalid res_id or resource_id" << std::endl;
+        return false;
+    }
+    if (p->view_dimension > D3D11_UAV_DIMENSION_TEXTURE3D || (p->format != 0 && !IsValidDxgiFormat(p->format))) {
+        std::cerr << "[ServerDispatcher] CreateUav: invalid format " << p->format << " or dimension " << p->view_dimension << std::endl;
+        return false;
+    }
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource = m_resources.Get<ID3D11Resource>(p->resource_id);
+    if (!resource) {
+        std::cerr << "[ServerDispatcher] CreateUav: underlying resource not found: " << p->resource_id << std::endl;
+        return false;
+    }
+    const bool use_desc = (p->format != 0 || p->view_dimension != 0);
+    D3D11_UNORDERED_ACCESS_VIEW_DESC desc = {};
+    desc.Format = static_cast<DXGI_FORMAT>(p->format);
+    desc.ViewDimension = static_cast<D3D11_UAV_DIMENSION>(p->view_dimension);
+    static_assert(sizeof(desc.Buffer) == sizeof(p->fields), "UAV union is three UINTs");
+    std::memcpy(&desc.Buffer, p->fields, sizeof(p->fields));
+
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+    HRESULT hr = device->CreateUnorderedAccessView(resource.Get(), use_desc ? &desc : nullptr, &uav);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateUnorderedAccessView failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+    m_resources.Register(p->res_id, uav);
+    return true;
+}
+
+bool ServerDispatcher::HandleCSSetShader(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(VSSetShaderPayload)) return false;
+    const auto* p = reinterpret_cast<const VSSetShaderPayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> cs = m_resources.Get<ID3D11ComputeShader>(p->res_id);
+    context->CSSetShader(cs.Get(), nullptr, 0);
+    return true;
+}
+
+bool ServerDispatcher::HandleCSSetSrv(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(PSSetSrvPayload)) return false;
+    const auto* p = reinterpret_cast<const PSSetSrvPayload*>(payload);
+    if (p->slot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) return false;
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv = m_resources.GetSRV(p->res_id);
+    ID3D11ShaderResourceView* p_srv = srv.Get();
+    context->CSSetShaderResources(p->slot, 1, &p_srv);
+    return true;
+}
+
+bool ServerDispatcher::HandleCSSetUav(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CSSetUavPayload)) return false;
+    const auto* p = reinterpret_cast<const CSSetUavPayload*>(payload);
+    if (p->slot >= D3D11_1_UAV_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid CS UAV slot: " << p->slot << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = m_resources.Get<ID3D11UnorderedAccessView>(p->res_id);
+    ID3D11UnorderedAccessView* p_uav = uav.Get();
+    const UINT count = p->initial_count;
+    context->CSSetUnorderedAccessViews(p->slot, 1, &p_uav, &count);
+    return true;
+}
+
+bool ServerDispatcher::HandleCSSetCB(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(VSSetConstantBufferPayload)) return false;
+    const auto* p = reinterpret_cast<const VSSetConstantBufferPayload*>(payload);
+    if (p->slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT) return false;
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> cb = m_resources.GetBuffer(p->res_id);
+    ID3D11Buffer* p_cb = cb.Get();
+    context->CSSetConstantBuffers(p->slot, 1, &p_cb);
+    return true;
+}
+
+bool ServerDispatcher::HandleCSSetSampler(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(PSSetSamplerPayload)) return false;
+    const auto* p = reinterpret_cast<const PSSetSamplerPayload*>(payload);
+    if (p->slot >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) return false;
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler = m_resources.GetSamplerState(p->res_id);
+    ID3D11SamplerState* p_sampler = sampler.Get();
+    context->CSSetSamplers(p->slot, 1, &p_sampler);
+    return true;
+}
+
+bool ServerDispatcher::HandleDispatch(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(DispatchPayload)) return false;
+    const auto* p = reinterpret_cast<const DispatchPayload*>(payload);
+    const UINT limit = D3D11_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+    if (p->thread_group_x > limit || p->thread_group_y > limit || p->thread_group_z > limit) {
+        std::cerr << "[ServerDispatcher] Dispatch: thread group count exceeds " << limit << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    context->Dispatch(p->thread_group_x, p->thread_group_y, p->thread_group_z);
+    return true;
+}
+
+bool ServerDispatcher::HandleClearUav(const PacketHeader& header, const uint8_t* payload, size_t size) {
+    if (size < sizeof(ClearUavPayload)) return false;
+    const auto* p = reinterpret_cast<const ClearUavPayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = m_resources.Get<ID3D11UnorderedAccessView>(p->res_id);
+    if (!uav) {
+        std::cerr << "[ServerDispatcher] ClearUav: UAV not found: " << p->res_id << std::endl;
+        return false;
+    }
+    if (header.opcode == OP_CLEAR_UAV_UINT) {
+        context->ClearUnorderedAccessViewUint(uav.Get(), p->values);
+    } else {
+        float values[4];
+        std::memcpy(values, p->values, sizeof(values));
+        context->ClearUnorderedAccessViewFloat(uav.Get(), values);
+    }
     return true;
 }
 

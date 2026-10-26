@@ -72,6 +72,8 @@ enum RgpuOpcode : uint16_t {
     OP_CREATE_BLEND_STATE   = 0x001A, // Client -> Server: Create Blend State (transparency)
     OP_CREATE_DEPTH_STENCIL_STATE = 0x001B, // Client -> Server: Create Depth-Stencil State
     OP_CREATE_RASTERIZER_STATE    = 0x001C, // Client -> Server: Create Rasterizer State (culling, fill, scissor)
+    OP_CREATE_COMPUTE_SHADER      = 0x001D, // Client -> Server: Create Compute Shader from bytecode
+    OP_CREATE_UAV                 = 0x001E, // Client -> Server: Create Unordered Access View
 
     // 3. Pipeline State & Binding (0x0030 - 0x004F)
     OP_IA_SET_INPUT_LAYOUT  = 0x0030, // Client -> Server: Bind Input Layout to IA stage
@@ -93,6 +95,11 @@ enum RgpuOpcode : uint16_t {
     OP_OM_SET_RENDER_TARGETS_MRT = 0x0040, // Client -> Server: Bind 0..8 RTVs + DSV (0 RTVs = depth-only)
     OP_VS_SET_SRV           = 0x0041, // Client -> Server: Bind Shader Resource View to VS slot
     OP_VS_SET_SAMPLER       = 0x0042, // Client -> Server: Bind Sampler State to VS slot
+    OP_CS_SET_SHADER        = 0x0043, // Client -> Server: Bind Compute Shader
+    OP_CS_SET_SRV           = 0x0044, // Client -> Server: Bind Shader Resource View to CS slot
+    OP_CS_SET_UAV           = 0x0045, // Client -> Server: Bind Unordered Access View to CS slot
+    OP_CS_SET_CB            = 0x0046, // Client -> Server: Bind Constant Buffer to CS slot
+    OP_CS_SET_SAMPLER       = 0x0047, // Client -> Server: Bind Sampler State to CS slot
 
     // 4. Updates & Draw Calls (0x0050 - 0x006F)
     OP_UPDATE_SUBRESOURCE   = 0x0050, // Client -> Server: Update subresource memory
@@ -103,6 +110,9 @@ enum RgpuOpcode : uint16_t {
     OP_DRAW_INDEXED         = 0x0055, // Client -> Server: Draw indexed primitives
     OP_DRAW_INSTANCED       = 0x0056, // Client -> Server: Draw instanced primitives
     OP_DRAW_INDEXED_INSTANCED = 0x0057, // Client -> Server: Draw indexed instanced primitives
+    OP_DISPATCH             = 0x0058, // Client -> Server: Run the bound compute shader
+    OP_CLEAR_UAV_UINT       = 0x0059, // Client -> Server: ClearUnorderedAccessViewUint
+    OP_CLEAR_UAV_FLOAT      = 0x005A, // Client -> Server: ClearUnorderedAccessViewFloat
 
     // 5. Presentation & Streaming (0x0070 - 0x007F)
     OP_PRESENT              = 0x0070, // Client -> Server: End-of-frame present & readback trigger
@@ -223,6 +233,17 @@ struct CreateSrvArrayRange {
     uint32_t array_size;
 };
 
+// Every D3D11_UNORDERED_ACCESS_VIEW_DESC union is at most three UINTs (BUFFER {FirstElement,
+// NumElements, Flags}, TEXTURE2DARRAY {MipSlice, FirstArraySlice, ArraySize}, TEXTURE3D {MipSlice,
+// FirstWSlice, WSize}, ...); they travel verbatim. format and view_dimension 0 = no description.
+struct CreateUavPayload {
+    uint32_t res_id;              // Monotonic ID for this UAV
+    uint32_t resource_id;         // Underlying buffer or texture res_id
+    uint32_t format;              // DXGI_FORMAT
+    uint32_t view_dimension;      // D3D11_UAV_DIMENSION (1 BUFFER .. 8 TEXTURE3D)
+    uint32_t fields[3];           // The view description union
+};
+
 struct CreateRtvPayload {
     uint32_t res_id;              // Monotonic ID for this RTV
     uint32_t resource_id;         // Underlying texture res_id
@@ -340,6 +361,12 @@ struct OMSetRenderTargetsMrtPayload {
     uint32_t num_rtvs;            // 0..8; slots past num_rtvs are unbound
     uint32_t rtv_ids[8];          // Render Target View IDs (0: empty slot)
     uint32_t dsv_id;              // Depth Stencil View ID (0: none)
+};
+
+struct CSSetUavPayload {
+    uint32_t slot;                // UAV slot (0..7)
+    uint32_t res_id;              // UAV ID (0 to unbind)
+    uint32_t initial_count;       // Append/consume counter (0xFFFFFFFF keeps the current value)
 };
 
 struct OMSetBlendStatePayload {
@@ -482,6 +509,17 @@ struct DrawIndexedPayload {
     int32_t  base_vertex_location;// Value added to each index before reading vertex
 };
 
+struct DispatchPayload {
+    uint32_t thread_group_x;
+    uint32_t thread_group_y;
+    uint32_t thread_group_z;
+};
+
+struct ClearUavPayload {
+    uint32_t res_id;              // UAV ID
+    uint32_t values[4];           // UINT values, or the bit patterns of the 4 floats
+};
+
 struct DrawInstancedPayload {
     uint32_t vertex_count_per_instance;
     uint32_t instance_count;
@@ -593,6 +631,10 @@ static_assert(sizeof(DrawIndexedPayload) == 12);
 static_assert(sizeof(DrawInstancedPayload) == 16);
 static_assert(sizeof(DrawIndexedInstancedPayload) == 20);
 static_assert(sizeof(OMSetRenderTargetsMrtPayload) == 40);
+static_assert(sizeof(CreateUavPayload) == 28);
+static_assert(sizeof(CSSetUavPayload) == 12);
+static_assert(sizeof(DispatchPayload) == 12);
+static_assert(sizeof(ClearUavPayload) == 20);
 
 static_assert(sizeof(PresentPayload) == 20);
 static_assert(sizeof(FrameDataPayload) == 32);

@@ -402,6 +402,20 @@ inline void ProxySamplerState::GetDevice(ID3D11Device **ppDevice) {
     }
 }
 
+inline void ProxyComputeShader::GetDevice(ID3D11Device **ppDevice) {
+    if (ppDevice && m_device) {
+        *ppDevice = m_device;
+        m_device->AddRef();
+    }
+}
+
+inline void ProxyUnorderedAccessView::GetDevice(ID3D11Device **ppDevice) {
+    if (ppDevice && m_device) {
+        *ppDevice = m_device;
+        m_device->AddRef();
+    }
+}
+
 } // namespace RemoteGPU
 
 #endif // REMOTE_GPU_PROXY_DEVICE_H
