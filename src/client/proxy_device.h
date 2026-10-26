@@ -16,8 +16,11 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <string>
 
@@ -34,6 +37,15 @@ class ProxyD3D11DeviceContext;
 // devices it can build swap chains for.
 static constexpr GUID IID_IProxyDevice = {
     0x4b6e1c85, 0x4e7b, 0x4a1c, { 0x9e, 0x28, 0x87, 0xc9, 0xe0, 0xd9, 0x00, 0x02 }
+};
+
+// A frame returned by the server, already decompressed (RGBA8, width * 4 bytes per row).
+struct DecodedFrame {
+    uint32_t             width = 0;
+    uint32_t             height = 0;
+    uint32_t             format = 0;
+    uint64_t             frame_number = 0;
+    std::vector<uint8_t> pixels;
 };
 
 // Remote adapter identity reported by the server at handshake.
@@ -76,6 +88,12 @@ public:
     uint32_t GetTargetHeight() const noexcept { return m_targetHeight; }
     // Makes the host back buffer width x height (OP_RESIZE_BUFFERS) if it is not already.
     bool ResizeRemoteTargets(uint32_t width, uint32_t height);
+
+    // Frames returned by the server. A receiver thread reads and decodes OP_FRAME_DATA as soon as
+    // it arrives, so the socket is always drained even while the application keeps sending
+    // commands (no deadlock with several frames in flight), and decoding overlaps the application.
+    bool WaitFrame(DecodedFrame& out, uint32_t timeout_ms); // false: timeout or connection lost
+    bool TryPopFrame(DecodedFrame& out);                    // non-blocking
 
     // Connects to the server and performs the handshake; the host back buffer starts at
     // width x height. Returns a device holding one reference, with its immediate context.
@@ -325,6 +343,15 @@ private:
     RemoteAdapterInfo              m_adapterInfo;
     uint32_t                       m_targetWidth{0};
     uint32_t                       m_targetHeight{0};
+
+    void StartFrameReceiver();
+    void FrameReceiverLoop();
+    std::thread                    m_receiver;
+    std::mutex                     m_frameMutex;
+    std::condition_variable        m_frameReady;
+    std::deque<DecodedFrame>       m_frames;           // decoded, not yet presented
+    bool                           m_receiverStopped{false};
+    std::vector<uint8_t>           m_frameReference;   // last decoded frame (delta reference)
 
     Microsoft::WRL::ComPtr<ProxyD3D11DeviceContext> m_immediateContext;
 };

@@ -169,6 +169,18 @@ Server: desktop with NVIDIA GeForce RTX 4070, wired Ethernet. Client: Lenovo lap
 - Two-machine LAN operation (acceptance criterion) verified; the captured frame passes `verify_pixels.py` and is byte-identical with and without compression.
 - Without compression the Wi-Fi link is saturated. With compression bandwidth is no longer the limit: the 1:1 Present round trip (one frame in flight) is, which frame pipelining would address.
 
+### 1e. Frame Pipelining
+- `Present` sends `OP_PRESENT` and returns while fewer than `RGPU_FRAME_LATENCY` frames (default 2, 1..8; 1 = the original wait-for-every-frame behaviour) are in flight. Displayed frames are therefore `RGPU_FRAME_LATENCY - 1` frames behind the application.
+- A receiver thread per device reads and decodes every `OP_FRAME_DATA` as soon as it arrives and queues it, so the socket is always drained while the application sends commands (no send/receive deadlock with large uncompressed frames: 1920x1080 raw with 4 frames in flight runs cleanly) and decoding overlaps the application. The client socket has no receive timeout; TCP keepalive detects a vanished server.
+- The swap chain waits for frames still in flight before `ResizeBuffers` and on release (the capture is the last presented frame). No protocol or server change.
+- RTX 4070 over Wi-Fi, sample cube with compression, 300 frames x 2 runs:
+
+| Resolution | Latency 1 | Latency 2 (default) | Latency 3 |
+|---|---|---|---|
+| 640x480 | 143 FPS | 252 FPS | 361 FPS |
+| 1280x720 | 83 FPS | 156 FPS | 198 FPS |
+| 1920x1080 | 53 FPS | 95 FPS | 128 FPS |
+
 ### 1d. Real-Application Compatibility
 - Test corpus: Microsoft's Direct3D 11 tutorials 02, 04, 05, 06, 07 (github.com/walbourn/directx-sdk-samples, MIT), unmodified. `python scripts/run_compat_tests.py --fetch` downloads them (~1.5 MB, sparse clone into `build/third_party`), builds them with `tests/compat/shim` (DirectXMath subset missing from LLVM-MinGW), runs each through the proxy and checks the last frame. All five render correctly.
 - `OP_RESIZE_BUFFERS` (0x0072, `ResizeBuffersPayload {width, height}`) recreates the host back buffer; sent when a swap chain is created at a size other than the handshake size and on `ResizeBuffers`. As in D3D11, views on the old back buffer must be recreated.

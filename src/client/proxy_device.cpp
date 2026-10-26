@@ -3,8 +3,10 @@
 #include "proxy_swapchain.h"
 #include "proxy_dxgi.h"
 #include "dxgi_format_info.h"
+#include "frame_codec.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -71,8 +73,92 @@ ProxyD3D11Device::~ProxyD3D11Device() {
         p.exit_code = 0;
         SendCommand(OP_SHUTDOWN, &p, sizeof(p), FLAG_ONEWAY);
     }
+    if (m_receiver.joinable()) {
+        // Queued data (OP_SHUTDOWN) is still delivered; the blocked recv in the receiver returns.
+        if (m_socket && m_socket->IsValid()) ::shutdown(m_socket->GetRawSocket(), SD_BOTH);
+        m_receiver.join();
+    }
     // Break the device <-> context cycle (context only holds a raw device pointer).
     m_immediateContext.Reset();
+}
+
+// =============================================================================
+// Frame receiver
+// =============================================================================
+
+void ProxyD3D11Device::StartFrameReceiver() {
+    // Waiting for frames must not time out while the application is idle; TCP keepalive
+    // detects a server that silently disappeared.
+    m_socket->SetTimeouts(10000, 0);
+    m_socket->EnableKeepAlive(5000, 1000);
+    m_receiver = std::thread(&ProxyD3D11Device::FrameReceiverLoop, this);
+}
+
+void ProxyD3D11Device::FrameReceiverLoop() {
+    PacketHeader hdr = {};
+    std::vector<uint8_t> payload;
+    while (m_socket->RecvPacket(hdr, payload)) {
+        if (hdr.opcode == OP_SHUTDOWN) break;
+        if (hdr.opcode != OP_FRAME_DATA || payload.size() < sizeof(FrameDataPayload)) continue;
+
+        FrameDataPayload meta;
+        std::memcpy(&meta, payload.data(), sizeof(meta));
+        const size_t pixel_count = static_cast<size_t>(meta.width) * meta.height;
+        const size_t expected = pixel_count * 4;
+        const uint8_t* body = payload.data() + sizeof(meta);
+        const size_t body_size = payload.size() - sizeof(meta);
+
+        bool ok;
+        if (hdr.flags & FLAG_COMPRESSED) {
+            // Frames arrive in order, so the reference is always the previous decoded frame.
+            const bool has_reference = (m_frameReference.size() == expected);
+            if (!has_reference) m_frameReference.assign(expected, 0);
+            ok = meta.data_size == body_size &&
+                 FrameCodec::Decode(body, body_size, m_frameReference.data(), pixel_count, has_reference);
+        } else {
+            ok = meta.data_size >= expected && body_size >= expected;
+            if (ok) m_frameReference.assign(body, body + expected);
+        }
+        if (!ok) {
+            std::cerr << "[RemoteGPU] Corrupt frame " << meta.frame_number << "; closing the stream" << std::endl;
+            break;
+        }
+
+        DecodedFrame frame;
+        frame.width = meta.width;
+        frame.height = meta.height;
+        frame.format = meta.format;
+        frame.frame_number = meta.frame_number;
+        frame.pixels = m_frameReference;
+        {
+            std::lock_guard<std::mutex> lock(m_frameMutex);
+            m_frames.push_back(std::move(frame));
+        }
+        m_frameReady.notify_all();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        m_receiverStopped = true;
+    }
+    m_frameReady.notify_all();
+}
+
+bool ProxyD3D11Device::WaitFrame(DecodedFrame& out, uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(m_frameMutex);
+    m_frameReady.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                          [this] { return !m_frames.empty() || m_receiverStopped; });
+    if (m_frames.empty()) return false;
+    out = std::move(m_frames.front());
+    m_frames.pop_front();
+    return true;
+}
+
+bool ProxyD3D11Device::TryPopFrame(DecodedFrame& out) {
+    std::lock_guard<std::mutex> lock(m_frameMutex);
+    if (m_frames.empty()) return false;
+    out = std::move(m_frames.front());
+    m_frames.pop_front();
+    return true;
 }
 
 ProxyD3D11DeviceContext* ProxyD3D11Device::GetProxyContext() const noexcept {
@@ -753,6 +839,7 @@ HRESULT ProxyD3D11Device::Connect(const char* host, uint16_t port, uint32_t widt
     Microsoft::WRL::ComPtr<ProxyD3D11DeviceContext> context;
     context.Attach(new ProxyD3D11DeviceContext(device.Get()));
     device->SetProxyContext(context);
+    device->StartFrameReceiver(); // the handshake reply was the last synchronous read
 
     *ppDevice = device.Detach();
     return S_OK;

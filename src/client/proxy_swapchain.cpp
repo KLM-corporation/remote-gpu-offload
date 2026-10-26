@@ -52,6 +52,11 @@ ProxyDXGISwapChain::ProxyDXGISwapChain(ProxyD3D11Device* device, ProxyD3D11Devic
     : m_device(device), m_context(context), m_desc(desc) {
     m_device->AddRef();
     m_context->AddRef();
+    // RGPU_FRAME_LATENCY: frames allowed in flight (1 = wait for every frame, as before).
+    if (const char* latency = std::getenv("RGPU_FRAME_LATENCY")) {
+        const long value = std::strtol(latency, nullptr, 10);
+        if (value >= 1 && value <= 8) m_maxFramesInFlight = static_cast<uint32_t>(value);
+    }
     CreateBackBuffer();
     m_presenter.SetForceBgraConversion(true);
     m_presenter.Initialize(desc.OutputWindow, desc.BufferDesc.Width, desc.BufferDesc.Height);
@@ -72,6 +77,7 @@ void ProxyDXGISwapChain::CreateBackBuffer() {
 }
 
 ProxyDXGISwapChain::~ProxyDXGISwapChain() {
+    DrainFrames(); // the frames still in flight, so the capture is the last presented frame
     if (const char* path = std::getenv("RGPU_CAPTURE_FILE")) {
         if (!m_lastFrame.empty() && WriteBmp(path, m_lastFrame.data(), m_desc.BufferDesc.Width, m_desc.BufferDesc.Height)) {
             std::cerr << "[RemoteGPU] Last frame written to " << path << std::endl;
@@ -134,45 +140,38 @@ HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::Present(UINT SyncInterval, UINT Fl
     p.frame_number = ++m_frameNumber;
     if (!m_device->SendCommand(OP_PRESENT, &p, sizeof(p), FLAG_SYNC | FLAG_RESPONSE_REQUIRED | FLAG_END_OF_FRAME))
         return DXGI_ERROR_DEVICE_REMOVED;
+    ++m_framesInFlight;
 
-    // 1:1 pacing: block until the host has rendered and returned this frame.
-    std::shared_ptr<NetworkSocket> socket = m_device->GetSocket();
-    PacketHeader hdr = {};
-    std::vector<uint8_t> payload;
-    for (;;) {
-        if (!socket->RecvPacket(hdr, payload)) {
-            std::cerr << "[RemoteGPU] Connection lost while waiting for frame " << m_frameNumber << std::endl;
+    // Show whatever already came back, then block only while too many frames are in flight:
+    // the application renders frame N+1 while the server still works on frame N.
+    DecodedFrame frame;
+    while (m_device->TryPopFrame(frame)) ShowFrame(frame);
+    while (m_framesInFlight >= m_maxFramesInFlight) {
+        if (!m_device->WaitFrame(frame, kFrameTimeoutMs)) {
+            std::cerr << "[RemoteGPU] Connection lost while waiting for frame " << (m_frameNumber - m_framesInFlight + 1) << std::endl;
+            m_framesInFlight = 0;
             return DXGI_ERROR_DEVICE_REMOVED;
         }
-        if (hdr.opcode == OP_FRAME_DATA) break;
-        if (hdr.opcode == OP_SHUTDOWN) return DXGI_ERROR_DEVICE_REMOVED;
-        // Any other server->client packet is not expected here; skip it.
+        ShowFrame(frame);
     }
-
-    if (payload.size() < sizeof(FrameDataPayload)) return DXGI_ERROR_DEVICE_RESET;
-    FrameDataPayload frame;
-    std::memcpy(&frame, payload.data(), sizeof(frame));
-    const size_t pixel_count = static_cast<size_t>(frame.width) * frame.height;
-    const size_t expected = pixel_count * 4;
-    const uint8_t* body = payload.data() + sizeof(frame);
-    const size_t body_size = payload.size() - sizeof(frame);
-
-    if (hdr.flags & FLAG_COMPRESSED) {
-        // m_lastFrame is the previous decoded frame: the delta reference, decoded over in place.
-        const bool has_reference = (m_lastFrame.size() == expected);
-        if (!has_reference) m_lastFrame.assign(expected, 0);
-        if (frame.data_size != body_size ||
-            !FrameCodec::Decode(body, body_size, m_lastFrame.data(), pixel_count, has_reference)) {
-            std::cerr << "[RemoteGPU] Corrupt compressed frame " << frame.frame_number << std::endl;
-            m_lastFrame.clear(); // force the next frame to fail unless it is a key frame
-            return DXGI_ERROR_DEVICE_RESET;
-        }
-    } else {
-        if (frame.data_size < expected || body_size < expected) return DXGI_ERROR_DEVICE_RESET;
-        m_lastFrame.assign(body, body + expected);
-    }
-    m_presenter.Present(m_desc.OutputWindow, m_lastFrame.data(), frame.width, frame.height, frame.format);
     return S_OK;
+}
+
+void ProxyDXGISwapChain::ShowFrame(DecodedFrame& frame) {
+    if (m_framesInFlight > 0) --m_framesInFlight;
+    m_lastFrame.swap(frame.pixels);
+    m_presenter.Present(m_desc.OutputWindow, m_lastFrame.data(), frame.width, frame.height, frame.format);
+}
+
+void ProxyDXGISwapChain::DrainFrames() {
+    DecodedFrame frame;
+    while (m_framesInFlight > 0) {
+        if (!m_device->WaitFrame(frame, kFrameTimeoutMs)) {
+            m_framesInFlight = 0;
+            return;
+        }
+        ShowFrame(frame);
+    }
 }
 
 HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface) {
@@ -201,6 +200,7 @@ HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* pDes
 HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
                                                             DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
     ResolveSwapChainSize(m_desc.OutputWindow, Width, Height);
+    DrainFrames(); // frames in flight still have the old size
     if (!m_device->ResizeRemoteTargets(Width, Height)) return DXGI_ERROR_DEVICE_REMOVED;
     if (BufferCount) m_desc.BufferCount = BufferCount;
     if (NewFormat != DXGI_FORMAT_UNKNOWN) m_desc.BufferDesc.Format = NewFormat;

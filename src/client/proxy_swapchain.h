@@ -13,8 +13,8 @@ class ProxyD3D11DeviceContext;
 
 /**
  * @brief COM proxy of IDXGISwapChain.
- * Present() sends OP_PRESENT, blocks until the matching OP_FRAME_DATA arrives (1:1 frame pacing),
- * and blits the pixels into OutputWindow through GDI. The back buffer is a ProxyTexture2D with
+ * Present() sends OP_PRESENT and returns at once while fewer than RGPU_FRAME_LATENCY frames
+ * (default 2) are in flight; returned frames are blitted into OutputWindow through GDI. The back buffer is a ProxyTexture2D with
  * res_id 0, which the host maps to its offscreen render target.
  */
 class ProxyDXGISwapChain : public IDXGISwapChain1 {
@@ -68,7 +68,11 @@ public:
     HRESULT STDMETHODCALLTYPE GetRotation(DXGI_MODE_ROTATION* pRotation) override;
 
 private:
+    static constexpr uint32_t kFrameTimeoutMs = 30000;
+
     void CreateBackBuffer();
+    void ShowFrame(DecodedFrame& frame); // blit to the window; the frame is no longer in flight
+    void DrainFrames();                  // wait for every frame still in flight
 
     ProxyD3D11Device*        m_device;   // owned reference
     ProxyD3D11DeviceContext* m_context;  // owned reference
@@ -77,6 +81,8 @@ private:
     GdiPresenter             m_presenter;
     std::vector<uint8_t>     m_lastFrame;
     uint64_t                 m_frameNumber{0};
+    uint32_t                 m_framesInFlight{0};    // presented, not yet returned by the server
+    uint32_t                 m_maxFramesInFlight{2}; // RGPU_FRAME_LATENCY
     DXGI_RGBA                m_backgroundColor{0, 0, 0, 1};
     volatile ULONG           m_refCount{1};
 };
