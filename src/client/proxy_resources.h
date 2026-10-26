@@ -251,6 +251,169 @@ private:
 };
 
 // =============================================================================
+// ProxyTexture3D: ID3D11Texture3D
+// =============================================================================
+class ProxyTexture3D : public ID3D11Texture3D, public ProxyResourceBase {
+public:
+    ProxyTexture3D(uint32_t res_id, const D3D11_TEXTURE3D_DESC& desc, ProxyD3D11Device* device)
+        : ProxyResourceBase(res_id, device), m_desc(desc) {}
+
+    // IUnknown
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11DeviceChild) ||
+            riid == __uuidof(ID3D11Resource) || riid == __uuidof(ID3D11Texture3D)) {
+            *ppvObject = static_cast<ID3D11Texture3D*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IProxyResource) {
+            *ppvObject = static_cast<IProxyResource*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return AddRefBase(); }
+    ULONG STDMETHODCALLTYPE Release() override { return ReleaseBase(); }
+
+    // ID3D11DeviceChild
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device **ppDevice) override;
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
+
+    // ID3D11Resource
+    void STDMETHODCALLTYPE GetType(D3D11_RESOURCE_DIMENSION *pResourceDimension) override {
+        if (pResourceDimension) *pResourceDimension = D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+    }
+    void STDMETHODCALLTYPE SetEvictionPriority(UINT) override {}
+    UINT STDMETHODCALLTYPE GetEvictionPriority() override { return 0; }
+
+    // ID3D11Texture3D
+    void STDMETHODCALLTYPE GetDesc(D3D11_TEXTURE3D_DESC *pDesc) override {
+        if (pDesc) *pDesc = m_desc;
+    }
+
+private:
+    D3D11_TEXTURE3D_DESC m_desc{};
+};
+
+// =============================================================================
+// ProxyTexture1D: ID3D11Texture1D
+// =============================================================================
+class ProxyTexture1D : public ID3D11Texture1D, public ProxyResourceBase {
+public:
+    ProxyTexture1D(uint32_t res_id, const D3D11_TEXTURE1D_DESC& desc, ProxyD3D11Device* device)
+        : ProxyResourceBase(res_id, device), m_desc(desc) {}
+
+    // IUnknown
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11DeviceChild) ||
+            riid == __uuidof(ID3D11Resource) || riid == __uuidof(ID3D11Texture1D)) {
+            *ppvObject = static_cast<ID3D11Texture1D*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IProxyResource) {
+            *ppvObject = static_cast<IProxyResource*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return AddRefBase(); }
+    ULONG STDMETHODCALLTYPE Release() override { return ReleaseBase(); }
+
+    // ID3D11DeviceChild
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device **ppDevice) override;
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
+
+    // ID3D11Resource
+    void STDMETHODCALLTYPE GetType(D3D11_RESOURCE_DIMENSION *pResourceDimension) override {
+        if (pResourceDimension) *pResourceDimension = D3D11_RESOURCE_DIMENSION_TEXTURE1D;
+    }
+    void STDMETHODCALLTYPE SetEvictionPriority(UINT) override {}
+    UINT STDMETHODCALLTYPE GetEvictionPriority() override { return 0; }
+
+    // ID3D11Texture1D
+    void STDMETHODCALLTYPE GetDesc(D3D11_TEXTURE1D_DESC *pDesc) override {
+        if (pDesc) *pDesc = m_desc;
+    }
+
+private:
+    D3D11_TEXTURE1D_DESC m_desc{};
+};
+
+// =============================================================================
+// ProxyQuery: ID3D11Query / ID3D11Predicate
+// =============================================================================
+class ProxyQuery : public ID3D11Query, public ProxyResourceBase {
+public:
+    ProxyQuery(uint32_t res_id, const D3D11_QUERY_DESC& desc, ProxyD3D11Device* device)
+        : ProxyResourceBase(res_id, device), m_desc(desc) {}
+
+    // IUnknown
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11DeviceChild) ||
+            riid == __uuidof(ID3D11Asynchronous) || riid == __uuidof(ID3D11Query)) {
+            *ppvObject = static_cast<ID3D11Query*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == __uuidof(ID3D11Predicate)) {
+            *ppvObject = static_cast<ID3D11Predicate*>(reinterpret_cast<ID3D11Predicate*>(this));
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IProxyResource) {
+            *ppvObject = static_cast<IProxyResource*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return AddRefBase(); }
+    ULONG STDMETHODCALLTYPE Release() override { return ReleaseBase(); }
+
+    // ID3D11DeviceChild
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device **ppDevice) override;
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
+
+    // ID3D11Asynchronous
+    UINT STDMETHODCALLTYPE GetDataSize() override {
+        switch (m_desc.Query) {
+            case D3D11_QUERY_EVENT: return sizeof(BOOL);
+            case D3D11_QUERY_OCCLUSION: return sizeof(UINT64);
+            case D3D11_QUERY_TIMESTAMP: return sizeof(UINT64);
+            case D3D11_QUERY_TIMESTAMP_DISJOINT: return sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT);
+            case D3D11_QUERY_PIPELINE_STATISTICS: return sizeof(D3D11_QUERY_DATA_PIPELINE_STATISTICS);
+            case D3D11_QUERY_OCCLUSION_PREDICATE: return sizeof(BOOL);
+            case D3D11_QUERY_SO_STATISTICS: return sizeof(D3D11_QUERY_DATA_SO_STATISTICS);
+            case D3D11_QUERY_SO_OVERFLOW_PREDICATE: return sizeof(BOOL);
+            default: return 0;
+        }
+    }
+
+    // ID3D11Query
+    void STDMETHODCALLTYPE GetDesc(D3D11_QUERY_DESC *pDesc) override {
+        if (pDesc) *pDesc = m_desc;
+    }
+
+private:
+    D3D11_QUERY_DESC m_desc{};
+};
+
+// =============================================================================
 // ProxyShaderResourceView: ID3D11ShaderResourceView
 // =============================================================================
 class ProxyShaderResourceView : public ID3D11ShaderResourceView, public ProxyResourceBase {
@@ -258,8 +421,43 @@ public:
     ProxyShaderResourceView(uint32_t res_id, ID3D11Resource* pRes, const D3D11_SHADER_RESOURCE_VIEW_DESC* pDesc, ProxyD3D11Device* device)
         : ProxyResourceBase(res_id, device), m_resource(pRes)
     {
-        if (pDesc) m_desc = *pDesc;
-        else std::memset(&m_desc, 0, sizeof(m_desc));
+        if (pDesc) {
+            m_desc = *pDesc;
+        } else if (pRes) {
+            std::memset(&m_desc, 0, sizeof(m_desc));
+            D3D11_RESOURCE_DIMENSION dim;
+            pRes->GetType(&dim);
+            if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+                if (SUCCEEDED(pRes->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                    D3D11_TEXTURE2D_DESC td;
+                    tex->GetDesc(&td);
+                    m_desc.Format = td.Format;
+                    if (td.ArraySize > 1) {
+                        m_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                        m_desc.Texture2DArray.FirstArraySlice = 0;
+                        m_desc.Texture2DArray.ArraySize = td.ArraySize;
+                        m_desc.Texture2DArray.MipLevels = td.MipLevels;
+                    } else {
+                        m_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                        m_desc.Texture2D.MipLevels = td.MipLevels;
+                    }
+                }
+            } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+                Microsoft::WRL::ComPtr<ID3D11Texture3D> tex;
+                if (SUCCEEDED(pRes->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                    D3D11_TEXTURE3D_DESC td;
+                    tex->GetDesc(&td);
+                    m_desc.Format = td.Format;
+                    m_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+                    m_desc.Texture3D.MipLevels = td.MipLevels;
+                }
+            } else if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+                m_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            }
+        } else {
+            std::memset(&m_desc, 0, sizeof(m_desc));
+        }
     }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {

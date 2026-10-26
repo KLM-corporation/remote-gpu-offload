@@ -184,6 +184,56 @@ int main(int argc, char** argv) {
     ID3D11Texture2D* bcTex = nullptr;
     CHECK(SUCCEEDED(dev->CreateTexture2D(&td, &bcInit, &bcTex)), "CreateTexture2D BC1 compressed");
 
+    // --- Texture3D & Texture1D & Query tests
+    D3D11_TEXTURE3D_DESC t3dDesc = {};
+    t3dDesc.Width = 1;
+    t3dDesc.Height = 1;
+    t3dDesc.Depth = 1;
+    t3dDesc.MipLevels = 1;
+    t3dDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    t3dDesc.Usage = D3D11_USAGE_DEFAULT;
+    t3dDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    uint32_t dummyPixel = 0xFFFFFFFF;
+    D3D11_SUBRESOURCE_DATA t3dInit = {&dummyPixel, 4, 4};
+    ID3D11Texture3D* tex3D = nullptr;
+    CHECK(SUCCEEDED(dev->CreateTexture3D(&t3dDesc, &t3dInit, &tex3D)), "CreateTexture3D 1x1x1 dummy (UE4 pattern)");
+    if (tex3D) {
+        ID3D11ShaderResourceView* srv3D = nullptr;
+        CHECK(SUCCEEDED(dev->CreateShaderResourceView(tex3D, nullptr, &srv3D)), "CreateShaderResourceView for Texture3D");
+        if (srv3D) srv3D->Release();
+        tex3D->Release();
+    }
+
+    D3D11_TEXTURE1D_DESC t1dDesc = {};
+    t1dDesc.Width = 4;
+    t1dDesc.MipLevels = 1;
+    t1dDesc.ArraySize = 1;
+    t1dDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    t1dDesc.Usage = D3D11_USAGE_DEFAULT;
+    t1dDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    uint32_t pixels1D[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    D3D11_SUBRESOURCE_DATA t1dInit = {pixels1D, 16, 0};
+    ID3D11Texture1D* tex1D = nullptr;
+    CHECK(SUCCEEDED(dev->CreateTexture1D(&t1dDesc, &t1dInit, &tex1D)), "CreateTexture1D 4-texel");
+    if (tex1D) {
+        ID3D11ShaderResourceView* srv1D = nullptr;
+        CHECK(SUCCEEDED(dev->CreateShaderResourceView(tex1D, nullptr, &srv1D)), "CreateShaderResourceView for Texture1D");
+        if (srv1D) srv1D->Release();
+        tex1D->Release();
+    }
+
+    D3D11_QUERY_DESC qDesc = {};
+    qDesc.Query = D3D11_QUERY_EVENT;
+    ID3D11Query* pQuery = nullptr;
+    CHECK(SUCCEEDED(dev->CreateQuery(&qDesc, &pQuery)), "CreateQuery D3D11_QUERY_EVENT");
+    if (pQuery) {
+        ctx->Begin(pQuery);
+        ctx->End(pQuery);
+        BOOL completed = FALSE;
+        CHECK(SUCCEEDED(ctx->GetData(pQuery, &completed, sizeof(completed), 0)) && completed == TRUE, "GetData for D3D11_QUERY_EVENT returns TRUE");
+        pQuery->Release();
+    }
+
     ID3D11ShaderResourceView* srvs[4] = {};
     dev->CreateShaderResourceView(mipTex, nullptr, &srvs[0]);
     dev->CreateShaderResourceView(arrayTex, nullptr, &srvs[1]);

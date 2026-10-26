@@ -643,8 +643,133 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateRasterizerState(const D3D11_RA
     return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture1D(const D3D11_TEXTURE1D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture1D**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture3D(const D3D11_TEXTURE3D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture3D**) { return E_NOTIMPL; }
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture1D(const D3D11_TEXTURE1D_DESC* pDesc,
+                                                            const D3D11_SUBRESOURCE_DATA* pInitialData,
+                                                            ID3D11Texture1D** ppTexture1D) {
+    if (!pDesc) return E_INVALIDARG;
+    if (!ppTexture1D) return S_FALSE;
+    if (m_deviceRemoved) return DXGI_ERROR_DEVICE_REMOVED;
+
+    const bool has_data = pInitialData && pInitialData->pSysMem;
+    std::vector<RgpuSubresourceData> table;
+    std::vector<uint8_t> blob;
+    if (has_data) {
+        const uint32_t mip_levels = pDesc->MipLevels ? pDesc->MipLevels : FullMipCount1D(pDesc->Width);
+        const size_t count = static_cast<size_t>(mip_levels) * pDesc->ArraySize;
+        table.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t mip = static_cast<uint32_t>(i % mip_levels);
+            const uint32_t mw = MipSize(pDesc->Width, mip);
+            uint64_t row_bytes = 0;
+            uint32_t rows = 0;
+            if (!SurfaceLayout(pDesc->Format, mw, 1, row_bytes, rows)) {
+                std::cerr << "[RemoteGPU] CreateTexture1D: initial data not supported for format " << pDesc->Format << std::endl;
+                return E_NOTIMPL;
+            }
+            const D3D11_SUBRESOURCE_DATA& src = pInitialData[i];
+            if (!src.pSysMem) return E_INVALIDARG;
+            if (blob.size() + row_bytes > 0xFFFFFFFFull) return E_OUTOFMEMORY;
+            table[i] = {src.SysMemPitch, 0, static_cast<uint32_t>(blob.size()), static_cast<uint32_t>(row_bytes)};
+            const auto* first = static_cast<const uint8_t*>(src.pSysMem);
+            blob.insert(blob.end(), first, first + row_bytes);
+        }
+    }
+
+    const uint32_t id = AllocateResourceId();
+    CreateTexture1DPayload p = {};
+    p.res_id = id;
+    p.width = pDesc->Width;
+    p.mips = pDesc->MipLevels;
+    p.array_size = pDesc->ArraySize;
+    p.format = pDesc->Format;
+    p.usage = pDesc->Usage;
+    p.bind_flags = pDesc->BindFlags;
+    p.cpu_access_flags = pDesc->CPUAccessFlags;
+    p.misc_flags = pDesc->MiscFlags;
+    p.has_initial_data = has_data ? TEXTURE_INITIAL_DATA_SUBRESOURCES : TEXTURE_INITIAL_DATA_NONE;
+    p.sys_mem_pitch = has_data ? pInitialData->SysMemPitch : 0;
+    p.initial_data_size = static_cast<uint32_t>(blob.size());
+
+    std::vector<uint8_t> extra;
+    if (has_data) {
+        const uint32_t count = static_cast<uint32_t>(table.size());
+        extra.resize(sizeof(count) + table.size() * sizeof(RgpuSubresourceData) + blob.size());
+        std::memcpy(extra.data(), &count, sizeof(count));
+        std::memcpy(extra.data() + sizeof(count), table.data(), table.size() * sizeof(RgpuSubresourceData));
+        std::memcpy(extra.data() + sizeof(count) + table.size() * sizeof(RgpuSubresourceData), blob.data(), blob.size());
+    }
+    if (!SendWithBlob(this, OP_CREATE_TEXTURE1D, &p, sizeof(p), extra.data(), extra.size()))
+        return DXGI_ERROR_DEVICE_REMOVED;
+
+    *ppTexture1D = new ProxyTexture1D(id, *pDesc, this);
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateTexture3D(const D3D11_TEXTURE3D_DESC* pDesc,
+                                                            const D3D11_SUBRESOURCE_DATA* pInitialData,
+                                                            ID3D11Texture3D** ppTexture3D) {
+    if (!pDesc) return E_INVALIDARG;
+    if (!ppTexture3D) return S_FALSE;
+    if (m_deviceRemoved) return DXGI_ERROR_DEVICE_REMOVED;
+
+    const bool has_data = pInitialData && pInitialData->pSysMem;
+    std::vector<RgpuSubresourceData> table;
+    std::vector<uint8_t> blob;
+    if (has_data) {
+        const uint32_t mip_levels = pDesc->MipLevels ? pDesc->MipLevels : FullMipCount3D(pDesc->Width, pDesc->Height, pDesc->Depth);
+        table.resize(mip_levels);
+        for (uint32_t i = 0; i < mip_levels; ++i) {
+            const uint32_t mw = MipSize(pDesc->Width, i);
+            const uint32_t mh = MipSize(pDesc->Height, i);
+            const uint32_t md = MipSize(pDesc->Depth, i);
+            uint64_t row_bytes = 0;
+            uint32_t rows = 0;
+            if (!SurfaceLayout(pDesc->Format, mw, mh, row_bytes, rows)) {
+                std::cerr << "[RemoteGPU] CreateTexture3D: initial data not supported for format " << pDesc->Format << std::endl;
+                return E_NOTIMPL;
+            }
+            const D3D11_SUBRESOURCE_DATA& src = pInitialData[i];
+            if (!src.pSysMem) return E_INVALIDARG;
+            const uint64_t slice_bytes = (rows > 1) ? (static_cast<uint64_t>(src.SysMemPitch) * (rows - 1) + row_bytes) : row_bytes;
+            const uint64_t bytes = (md > 1) ? (static_cast<uint64_t>(src.SysMemSlicePitch) * (md - 1) + slice_bytes) : slice_bytes;
+            if (blob.size() + bytes > 0xFFFFFFFFull) return E_OUTOFMEMORY;
+            table[i] = {src.SysMemPitch, src.SysMemSlicePitch, static_cast<uint32_t>(blob.size()), static_cast<uint32_t>(bytes)};
+            const auto* first = static_cast<const uint8_t*>(src.pSysMem);
+            blob.insert(blob.end(), first, first + bytes);
+        }
+    }
+
+    const uint32_t id = AllocateResourceId();
+    CreateTexture3DPayload p = {};
+    p.res_id = id;
+    p.width = pDesc->Width;
+    p.height = pDesc->Height;
+    p.depth = pDesc->Depth;
+    p.mips = pDesc->MipLevels;
+    p.format = pDesc->Format;
+    p.usage = pDesc->Usage;
+    p.bind_flags = pDesc->BindFlags;
+    p.cpu_access_flags = pDesc->CPUAccessFlags;
+    p.misc_flags = pDesc->MiscFlags;
+    p.has_initial_data = has_data ? TEXTURE_INITIAL_DATA_SUBRESOURCES : TEXTURE_INITIAL_DATA_NONE;
+    p.sys_mem_pitch = has_data ? pInitialData->SysMemPitch : 0;
+    p.sys_mem_slice_pitch = has_data ? pInitialData->SysMemSlicePitch : 0;
+    p.initial_data_size = static_cast<uint32_t>(blob.size());
+
+    std::vector<uint8_t> extra;
+    if (has_data) {
+        const uint32_t count = static_cast<uint32_t>(table.size());
+        extra.resize(sizeof(count) + table.size() * sizeof(RgpuSubresourceData) + blob.size());
+        std::memcpy(extra.data(), &count, sizeof(count));
+        std::memcpy(extra.data() + sizeof(count), table.data(), table.size() * sizeof(RgpuSubresourceData));
+        std::memcpy(extra.data() + sizeof(count) + table.size() * sizeof(RgpuSubresourceData), blob.data(), blob.size());
+    }
+    if (!SendWithBlob(this, OP_CREATE_TEXTURE3D, &p, sizeof(p), extra.data(), extra.size()))
+        return DXGI_ERROR_DEVICE_REMOVED;
+
+    *ppTexture3D = new ProxyTexture3D(id, *pDesc, this);
+    return S_OK;
+}
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateUnorderedAccessView(ID3D11Resource* pResource,
                                                                       const D3D11_UNORDERED_ACCESS_VIEW_DESC* pDesc,
                                                                       ID3D11UnorderedAccessView** ppUAView) {
@@ -710,8 +835,20 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateComputeShader(const void* pSha
     return S_OK;
 }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateClassLinkage(ID3D11ClassLinkage**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateQuery(const D3D11_QUERY_DESC*, ID3D11Query**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreatePredicate(const D3D11_QUERY_DESC*, ID3D11Predicate**) { return E_NOTIMPL; }
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateQuery(const D3D11_QUERY_DESC* pDesc, ID3D11Query** ppQuery) {
+    if (!pDesc) return E_INVALIDARG;
+    if (!ppQuery) return S_FALSE;
+    const uint32_t id = AllocateResourceId();
+    *ppQuery = new ProxyQuery(id, *pDesc, this);
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreatePredicate(const D3D11_QUERY_DESC* pDesc, ID3D11Predicate** ppPredicate) {
+    if (!pDesc) return E_INVALIDARG;
+    if (!ppPredicate) return S_FALSE;
+    const uint32_t id = AllocateResourceId();
+    *ppPredicate = reinterpret_cast<ID3D11Predicate*>(new ProxyQuery(id, *pDesc, this));
+    return S_OK;
+}
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateCounter(const D3D11_COUNTER_DESC*, ID3D11Counter**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateDeferredContext(UINT, ID3D11DeviceContext**) { return E_NOTIMPL; }
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::OpenSharedResource(HANDLE, REFIID, void**) { return E_NOTIMPL; }
@@ -726,9 +863,14 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CheckFormatSupport(DXGI_FORMAT Forma
         *pFormatSupport = 0;
         return E_FAIL;
     }
-    *pFormatSupport = D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE |
-                      D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_DEPTH_STENCIL |
-                      D3D11_FORMAT_SUPPORT_CPU_LOCKABLE | D3D11_FORMAT_SUPPORT_DISPLAY;
+    *pFormatSupport = D3D11_FORMAT_SUPPORT_BUFFER | D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER |
+                      D3D11_FORMAT_SUPPORT_IA_INDEX_BUFFER | D3D11_FORMAT_SUPPORT_TEXTURE1D |
+                      D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_TEXTURE3D |
+                      D3D11_FORMAT_SUPPORT_TEXTURECUBE | D3D11_FORMAT_SUPPORT_SHADER_LOAD |
+                      D3D11_FORMAT_SUPPORT_SHADER_SAMPLE | D3D11_FORMAT_SUPPORT_RENDER_TARGET |
+                      D3D11_FORMAT_SUPPORT_DEPTH_STENCIL | D3D11_FORMAT_SUPPORT_MIP |
+                      D3D11_FORMAT_SUPPORT_CPU_LOCKABLE | D3D11_FORMAT_SUPPORT_DISPLAY |
+                      D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
     return S_OK;
 }
 

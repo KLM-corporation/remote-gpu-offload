@@ -117,6 +117,22 @@ Interception across graphics APIs differs fundamentally by architecture. RGPU pr
 
 ---
 
+## 🎮 Running Unreal Engine 4 / Real Games (Poppy Playtime)
+
+RGPU includes native support for Unreal Engine 4 (`Poppy Playtime Chapter 1`):
+- **Direct3D 11.1 Feature Level:** Automatically negotiated (`0xb100` / `D3D_FEATURE_LEVEL_11_1`).
+- **Volume & 1D Textures:** Remoted `CreateTexture3D` and `CreateTexture1D` support with initial mip data.
+- **GPU Queries:** Asynchronous queries (`D3D11_QUERY_EVENT`, `OCCLUSION`, `TIMESTAMP`) handled smoothly.
+- **Frame Pipelining:** Configurable `RGPU_FRAME_LATENCY=2` allows client frame submission to overlap with remote GPU execution.
+- **Delta/LZ4 Compression:** Real-time run-length/delta compression on `OP_FRAME_DATA` reduces LAN bandwidth.
+
+### 1-Click Launch Instructions:
+1. Ensure the remote server daemon is running on the RTX 4070 PC (`192.168.1.17:48888`).
+2. Run `launch_poppy_playtime.bat` on your laptop.
+3. To revert the game back to native local execution at any time, run `remove_proxy_from_poppy.bat`.
+
+---
+
 ## 📦 Project Structure
 
 ```text

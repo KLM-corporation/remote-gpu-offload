@@ -380,6 +380,27 @@ inline void ProxyTexture2D::GetDevice(ID3D11Device **ppDevice) {
     }
 }
 
+inline void ProxyTexture3D::GetDevice(ID3D11Device **ppDevice) {
+    if (ppDevice && m_device) {
+        *ppDevice = m_device;
+        m_device->AddRef();
+    }
+}
+
+inline void ProxyTexture1D::GetDevice(ID3D11Device **ppDevice) {
+    if (ppDevice && m_device) {
+        *ppDevice = m_device;
+        m_device->AddRef();
+    }
+}
+
+inline void ProxyQuery::GetDevice(ID3D11Device **ppDevice) {
+    if (ppDevice && m_device) {
+        *ppDevice = m_device;
+        m_device->AddRef();
+    }
+}
+
 inline void ProxyShaderResourceView::GetDevice(ID3D11Device **ppDevice) {
     if (ppDevice && m_device) {
         *ppDevice = m_device;

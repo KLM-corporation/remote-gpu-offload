@@ -82,6 +82,20 @@ inline uint32_t FullMipCount(uint32_t width, uint32_t height) {
     return levels;
 }
 
+inline uint32_t FullMipCount3D(uint32_t width, uint32_t height, uint32_t depth) {
+    uint32_t largest = width > height ? (width > depth ? width : depth) : (height > depth ? height : depth);
+    uint32_t levels = 1;
+    while (largest > 1) {
+        largest >>= 1;
+        ++levels;
+    }
+    return levels;
+}
+
+inline uint32_t FullMipCount1D(uint32_t width) {
+    return FullMipCount(width, 1);
+}
+
 } // namespace RemoteGPU
 
 #endif // REMOTE_GPU_DXGI_FORMAT_INFO_H

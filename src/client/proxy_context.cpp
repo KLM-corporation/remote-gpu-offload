@@ -470,6 +470,19 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::UpdateSubresource(ID3D11Resource
         uint32_t rows = 0;
         if (!SurfaceLayout(desc.Format, width, height, row_bytes, rows) || SrcRowPitch < row_bytes) return;
         data_size = static_cast<uint32_t>(static_cast<uint64_t>(SrcRowPitch) * (rows - 1) + row_bytes);
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+        D3D11_TEXTURE3D_DESC desc;
+        static_cast<ID3D11Texture3D*>(pDstResource)->GetDesc(&desc);
+        const uint32_t mip_levels = desc.MipLevels ? desc.MipLevels : FullMipCount3D(desc.Width, desc.Height, desc.Depth);
+        const uint32_t mip = DstSubresource % mip_levels;
+        const uint32_t width = pDstBox ? pDstBox->right - pDstBox->left : MipSize(desc.Width, mip);
+        const uint32_t height = pDstBox ? pDstBox->bottom - pDstBox->top : MipSize(desc.Height, mip);
+        const uint32_t depth = pDstBox ? pDstBox->back - pDstBox->front : MipSize(desc.Depth, mip);
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(desc.Format, width, height, row_bytes, rows) || SrcRowPitch < row_bytes) return;
+        const uint64_t slice_bytes = (rows > 1) ? (static_cast<uint64_t>(SrcRowPitch) * (rows - 1) + row_bytes) : row_bytes;
+        data_size = static_cast<uint32_t>((depth > 1) ? (static_cast<uint64_t>(SrcDepthPitch) * (depth - 1) + slice_bytes) : slice_bytes);
     } else {
         return;
     }
@@ -492,6 +505,29 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::UpdateSubresource(ID3D11Resource
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Flush() {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::ClearState() {}
+
+HRESULT STDMETHODCALLTYPE ProxyD3D11DeviceContext::GetData(ID3D11Asynchronous* pAsync, void* pData, UINT DataSize, UINT GetDataFlags) {
+    if (!pAsync) return E_INVALIDARG;
+    if (pData && DataSize > 0) {
+        std::memset(pData, 0, DataSize);
+        auto* q = reinterpret_cast<ProxyQuery*>(pAsync);
+        D3D11_QUERY_DESC desc{};
+        q->GetDesc(&desc);
+        if (desc.Query == D3D11_QUERY_EVENT && DataSize >= sizeof(BOOL)) {
+            *reinterpret_cast<BOOL*>(pData) = TRUE;
+        } else if (desc.Query == D3D11_QUERY_OCCLUSION && DataSize >= sizeof(UINT64)) {
+            *reinterpret_cast<UINT64*>(pData) = 1000;
+        } else if (desc.Query == D3D11_QUERY_TIMESTAMP && DataSize >= sizeof(UINT64)) {
+            static uint64_t s_ts = 1000000;
+            *reinterpret_cast<UINT64*>(pData) = ++s_ts;
+        } else if (desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT && DataSize >= sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT)) {
+            auto* d = reinterpret_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(pData);
+            d->Frequency = 1000000000;
+            d->Disjoint = FALSE;
+        }
+    }
+    return S_OK;
+}
 
 // =============================================================================
 // Remaining ID3D11DeviceContext entry points: benign defaults

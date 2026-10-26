@@ -141,6 +141,10 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleCreateBuffer(header, payload, payload_size);
         case OP_CREATE_TEXTURE2D:
             return HandleCreateTexture2D(header, payload, payload_size);
+        case OP_CREATE_TEXTURE3D:
+            return HandleCreateTexture3D(header, payload, payload_size);
+        case OP_CREATE_TEXTURE1D:
+            return HandleCreateTexture1D(header, payload, payload_size);
         case OP_CREATE_SRV:
             return HandleCreateSrv(header, payload, payload_size);
         case OP_CREATE_RTV:
@@ -568,6 +572,216 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
 
     if (FAILED(hr)) {
         std::cerr << "[ServerDispatcher] CreateTexture2D failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+
+    m_resources.Register(p->res_id, texture);
+    return true;
+}
+
+bool ServerDispatcher::HandleCreateTexture3D(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateTexture3DPayload)) {
+        std::cerr << "[ServerDispatcher] CreateTexture3D payload too small: " << size << std::endl;
+        return false;
+    }
+
+    const auto* p = reinterpret_cast<const CreateTexture3DPayload*>(payload);
+    if (p->res_id == 0 || p->width == 0 || p->height == 0 || p->depth == 0) {
+        std::cerr << "[ServerDispatcher] CreateTexture3D: invalid parameters (res_id=" << p->res_id
+                  << ", " << p->width << "x" << p->height << "x" << p->depth << ")" << std::endl;
+        return false;
+    }
+
+    if (!IsValidDxgiFormat(p->format)) {
+        std::cerr << "[ServerDispatcher] CreateTexture3D: invalid format: " << p->format << std::endl;
+        return false;
+    }
+
+    if (p->usage > D3D11_USAGE_STAGING) {
+        std::cerr << "[ServerDispatcher] CreateTexture3D: invalid usage: " << p->usage << std::endl;
+        return false;
+    }
+
+    std::vector<D3D11_SUBRESOURCE_DATA> init_data;
+    if (p->has_initial_data != TEXTURE_INITIAL_DATA_NONE) {
+        const uint32_t mip_levels = p->mips ? p->mips : FullMipCount3D(p->width, p->height, p->depth);
+        if (mip_levels > FullMipCount3D(p->width, p->height, p->depth)) {
+            std::cerr << "[ServerDispatcher] CreateTexture3D: " << mip_levels << " mips exceed the full chain" << std::endl;
+            return false;
+        }
+        const size_t count = static_cast<size_t>(mip_levels);
+
+        std::vector<RgpuSubresourceData> table;
+        const uint8_t* blob = nullptr;
+        if (p->has_initial_data == TEXTURE_INITIAL_DATA_SINGLE) {
+            if (count != 1) {
+                std::cerr << "[ServerDispatcher] CreateTexture3D: single initial-data entry for " << count
+                          << " subresources" << std::endl;
+                return false;
+            }
+            table.push_back({p->sys_mem_pitch, p->sys_mem_slice_pitch, 0, p->initial_data_size});
+            blob = payload + sizeof(CreateTexture3DPayload);
+        } else if (p->has_initial_data == TEXTURE_INITIAL_DATA_SUBRESOURCES) {
+            const size_t header_end = sizeof(CreateTexture3DPayload) + sizeof(uint32_t);
+            if (size < header_end) return false;
+            uint32_t declared = 0;
+            std::memcpy(&declared, payload + sizeof(CreateTexture3DPayload), sizeof(declared));
+            if (declared != count || size - header_end < count * sizeof(RgpuSubresourceData)) {
+                std::cerr << "[ServerDispatcher] CreateTexture3D: subresource table mismatch" << std::endl;
+                return false;
+            }
+            table.resize(count);
+            std::memcpy(table.data(), payload + header_end, count * sizeof(RgpuSubresourceData));
+            blob = payload + header_end + count * sizeof(RgpuSubresourceData);
+        } else {
+            std::cerr << "[ServerDispatcher] CreateTexture3D: invalid has_initial_data " << p->has_initial_data << std::endl;
+            return false;
+        }
+
+        const size_t blob_available = size - static_cast<size_t>(blob - payload);
+        if (p->initial_data_size > blob_available) {
+            std::cerr << "[ServerDispatcher] CreateTexture3D payload missing initial data" << std::endl;
+            return false;
+        }
+        init_data.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t mip = static_cast<uint32_t>(i);
+            const uint32_t mw = MipSize(p->width, mip);
+            const uint32_t mh = MipSize(p->height, mip);
+            const uint32_t md = MipSize(p->depth, mip);
+            uint64_t row_bytes = 0;
+            uint32_t rows = 0;
+            if (!SurfaceLayout(p->format, mw, mh, row_bytes, rows)) {
+                std::cerr << "[ServerDispatcher] CreateTexture3D: initial data unsupported for format " << p->format << std::endl;
+                return false;
+            }
+            const RgpuSubresourceData& s = table[i];
+            const uint64_t slice_bytes = (rows > 1) ? (static_cast<uint64_t>(s.row_pitch) * (rows - 1) + row_bytes) : row_bytes;
+            const uint64_t needed = (md > 1) ? (static_cast<uint64_t>(s.slice_pitch) * (md - 1) + slice_bytes) : slice_bytes;
+            if (s.row_pitch < row_bytes || s.size < needed ||
+                static_cast<uint64_t>(s.offset) + s.size > p->initial_data_size) {
+                std::cerr << "[ServerDispatcher] CreateTexture3D: subresource " << i << " data out of bounds" << std::endl;
+                return false;
+            }
+            init_data[i].pSysMem = blob + s.offset;
+            init_data[i].SysMemPitch = s.row_pitch;
+            init_data[i].SysMemSlicePitch = s.slice_pitch;
+        }
+    } else if (p->usage == D3D11_USAGE_IMMUTABLE) {
+        std::cerr << "[ServerDispatcher] CreateTexture3D: IMMUTABLE texture requires initial data" << std::endl;
+        return false;
+    }
+
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+
+    D3D11_TEXTURE3D_DESC desc = {};
+    desc.Width = p->width;
+    desc.Height = p->height;
+    desc.Depth = p->depth;
+    desc.MipLevels = p->mips;
+    desc.Format = static_cast<DXGI_FORMAT>(p->format);
+    desc.Usage = static_cast<D3D11_USAGE>(p->usage);
+    desc.BindFlags = p->bind_flags;
+    desc.CPUAccessFlags = p->cpu_access_flags;
+    desc.MiscFlags = p->misc_flags;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture3D> texture;
+    HRESULT hr = device->CreateTexture3D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateTexture3D failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+
+    m_resources.Register(p->res_id, texture);
+    return true;
+}
+
+bool ServerDispatcher::HandleCreateTexture1D(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateTexture1DPayload)) {
+        std::cerr << "[ServerDispatcher] CreateTexture1D payload too small: " << size << std::endl;
+        return false;
+    }
+
+    const auto* p = reinterpret_cast<const CreateTexture1DPayload*>(payload);
+    if (p->res_id == 0 || p->width == 0 || p->array_size == 0) {
+        std::cerr << "[ServerDispatcher] CreateTexture1D: invalid parameters (res_id=" << p->res_id
+                  << ", " << p->width << ")" << std::endl;
+        return false;
+    }
+
+    if (!IsValidDxgiFormat(p->format)) {
+        std::cerr << "[ServerDispatcher] CreateTexture1D: invalid format: " << p->format << std::endl;
+        return false;
+    }
+
+    if (p->usage > D3D11_USAGE_STAGING) {
+        std::cerr << "[ServerDispatcher] CreateTexture1D: invalid usage: " << p->usage << std::endl;
+        return false;
+    }
+
+    std::vector<D3D11_SUBRESOURCE_DATA> init_data;
+    if (p->has_initial_data != TEXTURE_INITIAL_DATA_NONE) {
+        const uint32_t mip_levels = p->mips ? p->mips : FullMipCount1D(p->width);
+        const size_t count = static_cast<size_t>(mip_levels) * p->array_size;
+
+        std::vector<RgpuSubresourceData> table;
+        const uint8_t* blob = nullptr;
+        if (p->has_initial_data == TEXTURE_INITIAL_DATA_SINGLE) {
+            if (count != 1) return false;
+            table.push_back({p->sys_mem_pitch, 0, 0, p->initial_data_size});
+            blob = payload + sizeof(CreateTexture1DPayload);
+        } else if (p->has_initial_data == TEXTURE_INITIAL_DATA_SUBRESOURCES) {
+            const size_t header_end = sizeof(CreateTexture1DPayload) + sizeof(uint32_t);
+            if (size < header_end) return false;
+            uint32_t declared = 0;
+            std::memcpy(&declared, payload + sizeof(CreateTexture1DPayload), sizeof(declared));
+            if (declared != count || size - header_end < count * sizeof(RgpuSubresourceData)) return false;
+            table.resize(count);
+            std::memcpy(table.data(), payload + header_end, count * sizeof(RgpuSubresourceData));
+            blob = payload + header_end + count * sizeof(RgpuSubresourceData);
+        } else {
+            return false;
+        }
+
+        const size_t blob_available = size - static_cast<size_t>(blob - payload);
+        if (p->initial_data_size > blob_available) return false;
+        init_data.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t mip = static_cast<uint32_t>(i % mip_levels);
+            const uint32_t mw = MipSize(p->width, mip);
+            uint64_t row_bytes = 0;
+            uint32_t rows = 0;
+            if (!SurfaceLayout(p->format, mw, 1, row_bytes, rows)) return false;
+            const RgpuSubresourceData& s = table[i];
+            if (s.size < row_bytes || static_cast<uint64_t>(s.offset) + s.size > p->initial_data_size) return false;
+            init_data[i].pSysMem = blob + s.offset;
+            init_data[i].SysMemPitch = s.row_pitch;
+            init_data[i].SysMemSlicePitch = 0;
+        }
+    } else if (p->usage == D3D11_USAGE_IMMUTABLE) {
+        return false;
+    }
+
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+
+    D3D11_TEXTURE1D_DESC desc = {};
+    desc.Width = p->width;
+    desc.MipLevels = p->mips;
+    desc.ArraySize = p->array_size;
+    desc.Format = static_cast<DXGI_FORMAT>(p->format);
+    desc.Usage = static_cast<D3D11_USAGE>(p->usage);
+    desc.BindFlags = p->bind_flags;
+    desc.CPUAccessFlags = p->cpu_access_flags;
+    desc.MiscFlags = p->misc_flags;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture1D> texture;
+    HRESULT hr = device->CreateTexture1D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateTexture1D failed: 0x" << std::hex << hr << std::dec
                   << " (res_id=" << p->res_id << ")" << std::endl;
         return false;
     }
@@ -1353,6 +1567,31 @@ bool ServerDispatcher::HandleUpdateSubresource(const PacketHeader& /*header*/, c
             return false;
         }
         needed = static_cast<uint64_t>(p->row_pitch) * (rows - 1) + row_bytes;
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+        Microsoft::WRL::ComPtr<ID3D11Texture3D> texture;
+        res.As(&texture);
+        D3D11_TEXTURE3D_DESC td = {};
+        texture->GetDesc(&td);
+        if (p->subresource >= td.MipLevels) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: subresource " << p->subresource << " out of range" << std::endl;
+            return false;
+        }
+        const uint32_t mip = p->subresource;
+        const uint32_t mw = MipSize(td.Width, mip), mh = MipSize(td.Height, mip), md = MipSize(td.Depth, mip);
+        if (p_box && (box.right > mw || box.bottom > mh || box.back > md)) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: box outside the subresource" << std::endl;
+            return false;
+        }
+        uint64_t row_bytes = 0;
+        uint32_t rows = 0;
+        if (!SurfaceLayout(td.Format, p_box ? box.right - box.left : mw, p_box ? box.bottom - box.top : mh, row_bytes, rows) ||
+            p->row_pitch < row_bytes) {
+            std::cerr << "[ServerDispatcher] UpdateSubresource: unsupported format or row pitch too small" << std::endl;
+            return false;
+        }
+        const uint32_t depth = p_box ? (box.back - box.front) : md;
+        const uint64_t slice_bytes = (rows > 1) ? (static_cast<uint64_t>(p->row_pitch) * (rows - 1) + row_bytes) : row_bytes;
+        needed = (depth > 1) ? (static_cast<uint64_t>(p->depth_pitch) * (depth - 1) + slice_bytes) : slice_bytes;
     } else {
         std::cerr << "[ServerDispatcher] UpdateSubresource: unsupported resource dimension " << dim << std::endl;
         return false;

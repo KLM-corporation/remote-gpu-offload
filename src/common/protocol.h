@@ -84,6 +84,8 @@ enum RgpuOpcode : uint16_t {
     OP_CREATE_GEOMETRY_SHADER     = 0x001F, // Client -> Server: Create Geometry Shader from bytecode
     OP_CREATE_HULL_SHADER         = 0x0020, // Client -> Server: Create Hull Shader from bytecode
     OP_CREATE_DOMAIN_SHADER       = 0x0021, // Client -> Server: Create Domain Shader from bytecode
+    OP_CREATE_TEXTURE3D           = 0x0022, // Client -> Server: Allocate 3D texture
+    OP_CREATE_TEXTURE1D           = 0x0023, // Client -> Server: Allocate 1D texture
 
     // 3. Pipeline State & Binding (0x0030 - 0x004F)
     OP_IA_SET_INPUT_LAYOUT  = 0x0030, // Client -> Server: Bind Input Layout to IA stage
@@ -212,6 +214,38 @@ struct CreateTexture2DPayload {
     uint32_t has_initial_data;    // 1 if initial pixel bytes follow, 0 otherwise
     uint32_t sys_mem_pitch;       // Pitch in bytes of initial data (row stride)
     uint32_t sys_mem_slice_pitch; // Slice pitch of initial data
+    uint32_t initial_data_size;   // Byte count of initial pixel data
+};
+
+struct CreateTexture3DPayload {
+    uint32_t res_id;              // Unique monotonic texture resource ID
+    uint32_t width;               // Texture width in pixels
+    uint32_t height;              // Texture height in pixels
+    uint32_t depth;               // Texture depth in pixels
+    uint32_t mips;                // Number of mip levels (0 or 1 for unmipped)
+    uint32_t format;              // DXGI_FORMAT enum
+    uint32_t usage;               // D3D11_USAGE
+    uint32_t bind_flags;          // D3D11_BIND_FLAG
+    uint32_t cpu_access_flags;    // D3D11_CPU_ACCESS_FLAG
+    uint32_t misc_flags;          // D3D11_RESOURCE_MISC_FLAG
+    uint32_t has_initial_data;    // RgpuTextureInitialData
+    uint32_t sys_mem_pitch;       // Pitch in bytes of initial data (row stride)
+    uint32_t sys_mem_slice_pitch; // Slice pitch of initial data
+    uint32_t initial_data_size;   // Byte count of initial pixel data
+};
+
+struct CreateTexture1DPayload {
+    uint32_t res_id;              // Unique monotonic texture resource ID
+    uint32_t width;               // Texture width in pixels
+    uint32_t mips;                // Number of mip levels (0 or 1 for unmipped)
+    uint32_t array_size;          // Texture array size (usually 1)
+    uint32_t format;              // DXGI_FORMAT enum
+    uint32_t usage;               // D3D11_USAGE
+    uint32_t bind_flags;          // D3D11_BIND_FLAG
+    uint32_t cpu_access_flags;    // D3D11_CPU_ACCESS_FLAG
+    uint32_t misc_flags;          // D3D11_RESOURCE_MISC_FLAG
+    uint32_t has_initial_data;    // RgpuTextureInitialData
+    uint32_t sys_mem_pitch;       // Pitch in bytes of initial data (row stride)
     uint32_t initial_data_size;   // Byte count of initial pixel data
 };
 
@@ -645,6 +679,8 @@ static_assert(sizeof(ShutdownPayload) == 4);
 
 static_assert(sizeof(CreateBufferPayload) == 36);
 static_assert(sizeof(CreateTexture2DPayload) == 64);
+static_assert(sizeof(CreateTexture3DPayload) == 56);
+static_assert(sizeof(CreateTexture1DPayload) == 48);
 static_assert(sizeof(RgpuSubresourceData) == 16);
 static_assert(sizeof(CreateSrvPayload) == 24);
 static_assert(sizeof(CreateSrvArrayRange) == 8);

@@ -140,6 +140,8 @@ private:
     // Resource creation handlers
     bool HandleCreateBuffer(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCreateTexture2D(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCreateTexture3D(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCreateTexture1D(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCreateSrv(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCreateRtv(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCreateDsv(const PacketHeader& header, const uint8_t* payload, size_t size);
