@@ -79,14 +79,15 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | challenger_m2_r2_1 | teamwork_preview_challenger | Milestone 2 R2: Adversarial fuzzing & stress test verification | completed | 55a7e56e-8d2f-456b-985a-e86a897b3be1 |
 | challenger_m2_r2_2 | teamwork_preview_challenger | Milestone 2 R2: Measure command throughput & readback FPS | completed | b046f463-64bf-4e6a-8e84-ff43a95a81fa |
 | auditor_m2_r2_1 | teamwork_preview_auditor | Milestone 2 R2: Forensic integrity verification of bounds checking | completed | d2847189-b9fe-48ab-8660-a40d2c2ae6a6 |
-| explorer_m3_1 | teamwork_preview_explorer | Milestone 3: Proxy COM objects (Device, Context) spec | in-progress | 4e7f95af-fe3e-4468-b502-9f13dc0650f8 |
-| explorer_m3_2 | teamwork_preview_explorer | Milestone 3: Wrapper DLL exports and GDI presentation spec | in-progress | 282d59af-9f89-4d1d-844f-c8fd99fd83d0 |
-| explorer_m3_3 | teamwork_preview_explorer | Milestone 3: Client proxy test suite spec | in-progress | 99feb133-edb4-406c-a7cf-b864ac69c080 |
+| explorer_m3_1 | teamwork_preview_explorer | Milestone 3: Proxy COM objects (Device, Context) spec | completed | 4e7f95af-fe3e-4468-b502-9f13dc0650f8 |
+| explorer_m3_2 | teamwork_preview_explorer | Milestone 3: Wrapper DLL exports and GDI presentation spec | completed | 282d59af-9f89-4d1d-844f-c8fd99fd83d0 |
+| explorer_m3_3 | teamwork_preview_explorer | Milestone 3: Client proxy test suite spec | completed | 99feb133-edb4-406c-a7cf-b864ac69c080 |
+| worker_m3_1 | teamwork_preview_worker | Milestone 3: Implement client proxy COM, wrappers, GDI presenter, test suite | in-progress | 06c5c15f-fb88-45b7-ba8a-00fc5fbb01ab |
 
 ## Succession Status
 - Succession required: no (singleton orchestrator)
-- Spawn count: 33 / 128
-- Pending subagents: 4e7f95af-fe3e-4468-b502-9f13dc0650f8, 282d59af-9f89-4d1d-844f-c8fd99fd83d0, 99feb133-edb4-406c-a7cf-b864ac69c080
+- Spawn count: 34 / 128
+- Pending subagents: 06c5c15f-fb88-45b7-ba8a-00fc5fbb01ab
 - Predecessor: none
 - Successor: none
 

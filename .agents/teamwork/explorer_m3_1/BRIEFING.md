@@ -1,4 +1,4 @@
-# BRIEFING — 2026-10-26T18:25:00Z
+# BRIEFING — 2026-10-26T19:34:00Z
 
 ## Mission
 Design the C++ COM proxy classes for `ProxyD3D11Device` and `ProxyD3D11DeviceContext` (intercepting D3D11 API and serializing commands to the remote server).
@@ -19,15 +19,20 @@ Design the C++ COM proxy classes for `ProxyD3D11Device` and `ProxyD3D11DeviceCon
 
 ## Current Parent
 - Conversation ID: ed6dd465-ec42-4bab-b054-c76327c6c969
-- Updated: not yet
+- Updated: 2026-10-26T19:34:00Z
 
 ## Investigation State
-- **Explored paths**: None yet
-- **Key findings**: Task initiated
-- **Unexplored areas**: protocol.h, transport.h, PROJECT.md, spec_report.md, existing client/server implementation
+- **Explored paths**: `src/common/protocol.h`, `src/common/transport.h`, `src/common/transport.cpp`, `src/server/server_dispatcher.h`, `src/server/server_dispatcher.cpp`, `tests/test_server.cpp`, `tools/remote_test_client.cpp`, LLVM-MinGW `d3d11.h`.
+- **Key findings**:
+  - `ID3D11Device` has 40 methods; `ID3D11DeviceContext` has 108 methods. All must be declared to avoid abstract class errors.
+  - Proxy resource wrapper classes (`ProxyBuffer`, `ProxyTexture2D`, `ProxyShaderResourceView`, etc.) unified under `IProxyResource` (GUID `4b6e1c85-4e7b-4a1c-9e28-87c9e0d90001`) allow safe, instantaneous `res_id` retrieval across any COM pointer.
+  - Dynamic buffer mapping is resolved via client CPU shadow memory allocated in `ProxyBuffer` for `D3D11_USAGE_DYNAMIC`; `Unmap()` streams `OP_WRITE_BUFFER_DISCARD` to server.
+  - Reference count drops to 0 trigger `NotifyResourceDestroyed(res_id)`, dispatching `OP_DESTROY_RESOURCE` to the server to prevent VRAM leaks.
+- **Unexplored areas**: None within M3 Proxy COM design scope.
 
 ## Key Decisions Made
-- Initializing workspace and starting codebase investigation
+- Specification written to `proxy_com_spec.md` providing concrete C++ class definitions, signatures, and wire serialization routines.
+- 5-Component handoff report written to `handoff.md`.
 
 ## Artifact Index
 - `DISPATCH.md` — Record of orchestrator dispatch instructions
