@@ -55,12 +55,17 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | explorer_m1_1 | teamwork_preview_explorer | Milestone 1: Protocol Spec & Struct Layout | completed | 681a9199-d668-4988-bc8f-d4c0b8b6b47e |
 | explorer_m1_2 | teamwork_preview_explorer | Milestone 1: Winsock Transport Implementation Spec | completed | 4c708487-333d-4963-b5a2-be16b9f3e465 |
 | explorer_m1_3 | teamwork_preview_explorer | Milestone 1: Transport Test Suite Design | completed | e7f9ea4b-e143-478e-b86e-a7ed463b1177 |
-| worker_m1_1 | teamwork_preview_worker | Milestone 1: Implement protocol.h, transport.cpp, test_transport.cpp | in-progress | 6049dfaf-f9a0-4aa9-a12e-6cbadf2a6aa4 |
+| worker_m1_1 | teamwork_preview_worker | Milestone 1: Implement protocol.h, transport.cpp, test_transport.cpp | completed | 6049dfaf-f9a0-4aa9-a12e-6cbadf2a6aa4 |
+| reviewer_m1_1 | teamwork_preview_reviewer | Milestone 1: Review correctness & contracts | in-progress | 1c8fcb27-86b5-4d36-a0c2-ef289e0d2059 |
+| reviewer_m1_2 | teamwork_preview_reviewer | Milestone 1: Review R2 requirements & edge cases | in-progress | 73c98be1-0d8e-4cf1-b01e-f4b9d03830e4 |
+| challenger_m1_1 | teamwork_preview_challenger | Milestone 1: Stress test disconnects & malformed packets | in-progress | f0b049dc-d478-4f43-a989-1690f8f26e55 |
+| challenger_m1_2 | teamwork_preview_challenger | Milestone 1: Throughput benchmark & 16 MB transfers | in-progress | 6108eae6-4d41-4c00-b86f-908fe3bd80c4 |
+| auditor_m1_1 | teamwork_preview_auditor | Milestone 1: Forensic integrity verification | in-progress | cb98dacf-f7be-4a50-bf0e-142ac057c921 |
 
 ## Succession Status
 - Succession required: no
-- Spawn count: 7 / 16
-- Pending subagents: 6049dfaf-f9a0-4aa9-a12e-6cbadf2a6aa4
+- Spawn count: 12 / 16
+- Pending subagents: 1c8fcb27-86b5-4d36-a0c2-ef289e0d2059, 73c98be1-0d8e-4cf1-b01e-f4b9d03830e4, f0b049dc-d478-4f43-a989-1690f8f26e55, 6108eae6-4d41-4c00-b86f-908fe3bd80c4, cb98dacf-f7be-4a50-bf0e-142ac057c921
 - Predecessor: none
 - Successor: not yet spawned
 
