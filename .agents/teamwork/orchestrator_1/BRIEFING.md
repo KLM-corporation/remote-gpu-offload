@@ -73,12 +73,17 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | explorer_m2_r2_1 | teamwork_preview_explorer | Milestone 2 R2: Bounds validation specification | completed | 5fbc0b5b-ef6e-43dc-bb51-6b5fd486d9c1 |
 | explorer_m2_r2_2 | teamwork_preview_explorer | Milestone 2 R2: Input layout safety specification | completed | d8b476a3-9ef0-4a20-b212-4154fbe9bcd5 |
 | explorer_m2_r2_3 | teamwork_preview_explorer | Milestone 2 R2: Stress test criteria analysis | completed | af4d3e98-a049-4ee5-a0fa-2a4a7fa2df49 |
-| worker_m2_2 | teamwork_preview_worker | Milestone 2 R2: Implement parameter bounds validation in server_dispatcher | in-progress | 6d0d733c-717d-4c05-aded-f992a3147b86 |
+| worker_m2_2 | teamwork_preview_worker | Milestone 2 R2: Implement parameter bounds validation in server_dispatcher | completed | 6d0d733c-717d-4c05-aded-f992a3147b86 |
+| reviewer_m2_r2_1 | teamwork_preview_reviewer | Milestone 2 R2: Review topology/slot bounds checking | in-progress | 06f92a33-4540-4bb1-b1d1-a9c4fc149a5e |
+| reviewer_m2_r2_2 | teamwork_preview_reviewer | Milestone 2 R2: Review input layout safety & regression tests | in-progress | 3ecea549-19c8-4f4f-9208-25889ec2f16f |
+| challenger_m2_r2_1 | teamwork_preview_challenger | Milestone 2 R2: Adversarial fuzzing & stress test verification | in-progress | 55a7e56e-8d2f-456b-985a-e86a897b3be1 |
+| challenger_m2_r2_2 | teamwork_preview_challenger | Milestone 2 R2: Measure command throughput & readback FPS | in-progress | b046f463-64bf-4e6a-8e84-ff43a95a81fa |
+| auditor_m2_r2_1 | teamwork_preview_auditor | Milestone 2 R2: Forensic integrity verification of bounds checking | in-progress | d2847189-b9fe-48ab-8660-a40d2c2ae6a6 |
 
 ## Succession Status
 - Succession required: no (singleton orchestrator)
-- Spawn count: 25 / 128
-- Pending subagents: 6d0d733c-717d-4c05-aded-f992a3147b86
+- Spawn count: 30 / 128
+- Pending subagents: 06f92a33-4540-4bb1-b1d1-a9c4fc149a5e, 3ecea549-19c8-4f4f-9208-25889ec2f16f, 55a7e56e-8d2f-456b-985a-e86a897b3be1, b046f463-64bf-4e6a-8e84-ff43a95a81fa, d2847189-b9fe-48ab-8660-a40d2c2ae6a6
 - Predecessor: none
 - Successor: none
 
