@@ -197,6 +197,12 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleRSSetState(header, payload, payload_size);
         case OP_RS_SET_SCISSOR:
             return HandleRSSetScissor(header, payload, payload_size);
+        case OP_OM_SET_RENDER_TARGETS_MRT:
+            return HandleOMSetRenderTargetsMrt(header, payload, payload_size);
+        case OP_VS_SET_SRV:
+            return HandleVSSetSrv(header, payload, payload_size);
+        case OP_VS_SET_SAMPLER:
+            return HandleVSSetSampler(header, payload, payload_size);
 
         // 4. Updates & Draw Calls
         case OP_UPDATE_SUBRESOURCE:
@@ -211,6 +217,10 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleDraw(header, payload, payload_size);
         case OP_DRAW_INDEXED:
             return HandleDrawIndexed(header, payload, payload_size);
+        case OP_DRAW_INSTANCED:
+            return HandleDrawInstanced(header, payload, payload_size);
+        case OP_DRAW_INDEXED_INSTANCED:
+            return HandleDrawIndexedInstanced(header, payload, payload_size);
 
         // 5. Presentation
         case OP_PRESENT:
@@ -569,30 +579,20 @@ bool ServerDispatcher::HandleCreateSrv(const PacketHeader& /*header*/, const uin
     if (use_desc) {
         desc.Format = static_cast<DXGI_FORMAT>(p->format);
         desc.ViewDimension = static_cast<D3D11_SRV_DIMENSION>(p->view_dimension);
-        switch (desc.ViewDimension) {
-            case D3D11_SRV_DIMENSION_TEXTURE2D:
-            case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
-            case D3D11_SRV_DIMENSION_TEXTURECUBE:
-            case D3D11_SRV_DIMENSION_TEXTURECUBEARRAY: {
-                // These share the union layout {MostDetailedMip, MipLevels, first slice/face, count}.
-                desc.Texture2DArray.MostDetailedMip = p->most_detailed_mip;
-                desc.Texture2DArray.MipLevels = p->mip_levels;
-                CreateSrvArrayRange range = {0, 1};
-                if (size >= sizeof(CreateSrvPayload) + sizeof(CreateSrvArrayRange)) {
-                    std::memcpy(&range, payload + sizeof(CreateSrvPayload), sizeof(range));
-                } else if (desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
-                    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
-                    D3D11_TEXTURE2D_DESC td = {};
-                    if (SUCCEEDED(resource.As(&tex))) tex->GetDesc(&td);
-                    range.array_size = td.ArraySize ? td.ArraySize : 1; // older clients: whole array
-                }
-                desc.Texture2DArray.FirstArraySlice = range.first_array_slice;
-                desc.Texture2DArray.ArraySize = range.array_size;
-                break;
-            }
-            default:
-                break; // other dimensions keep a zeroed union (not forwarded yet)
+        // The view union is four UINTs at most (see CreateSrvArrayRange); copying them verbatim
+        // serves every dimension: buffers, 1D/2D/3D textures, arrays, cubes, multisampled.
+        CreateSrvArrayRange range = {0, 1};
+        if (size >= sizeof(CreateSrvPayload) + sizeof(CreateSrvArrayRange)) {
+            std::memcpy(&range, payload + sizeof(CreateSrvPayload), sizeof(range));
+        } else if (desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+            D3D11_TEXTURE2D_DESC td = {};
+            if (SUCCEEDED(resource.As(&tex))) tex->GetDesc(&td);
+            range.array_size = td.ArraySize ? td.ArraySize : 1; // older clients: whole array
         }
+        const uint32_t fields[4] = {p->most_detailed_mip, p->mip_levels, range.first_array_slice, range.array_size};
+        static_assert(sizeof(desc.Texture2DArray) == sizeof(fields), "SRV union is four UINTs");
+        std::memcpy(&desc.Texture2DArray, fields, sizeof(fields));
     }
 
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
@@ -1461,6 +1461,78 @@ bool ServerDispatcher::HandleDrawIndexed(const PacketHeader& /*header*/, const u
     if (!context) return false;
 
     context->DrawIndexed(p->index_count, p->start_index_location, p->base_vertex_location);
+    return true;
+}
+
+bool ServerDispatcher::HandleDrawInstanced(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(DrawInstancedPayload)) return false;
+    const auto* p = reinterpret_cast<const DrawInstancedPayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    context->DrawInstanced(p->vertex_count_per_instance, p->instance_count, p->start_vertex_location,
+                           p->start_instance_location);
+    return true;
+}
+
+bool ServerDispatcher::HandleDrawIndexedInstanced(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(DrawIndexedInstancedPayload)) return false;
+    const auto* p = reinterpret_cast<const DrawIndexedInstancedPayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    context->DrawIndexedInstanced(p->index_count_per_instance, p->instance_count, p->start_index_location,
+                                  p->base_vertex_location, p->start_instance_location);
+    return true;
+}
+
+bool ServerDispatcher::HandleOMSetRenderTargetsMrt(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(OMSetRenderTargetsMrtPayload)) return false;
+    const auto* p = reinterpret_cast<const OMSetRenderTargetsMrtPayload*>(payload);
+    if (p->num_rtvs > D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) {
+        std::cerr << "[ServerDispatcher] OMSetRenderTargetsMrt: " << p->num_rtvs << " render targets exceed the limit" << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+
+    // Unlike the single-RTV opcode, id 0 is an empty slot: no fallback to the host back buffer.
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    ID3D11RenderTargetView* raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    for (uint32_t i = 0; i < p->num_rtvs; ++i) {
+        rtvs[i] = m_resources.GetRTV(p->rtv_ids[i]);
+        raw[i] = rtvs[i].Get();
+    }
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv = m_resources.GetDSV(p->dsv_id);
+    context->OMSetRenderTargets(p->num_rtvs, p->num_rtvs ? raw : nullptr, dsv.Get());
+    return true;
+}
+
+bool ServerDispatcher::HandleVSSetSrv(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(PSSetSrvPayload)) return false;
+    const auto* p = reinterpret_cast<const PSSetSrvPayload*>(payload);
+    if (p->slot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid VS SRV slot: " << p->slot << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv = m_resources.GetSRV(p->res_id);
+    ID3D11ShaderResourceView* p_srv = srv.Get();
+    context->VSSetShaderResources(p->slot, 1, &p_srv);
+    return true;
+}
+
+bool ServerDispatcher::HandleVSSetSampler(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(PSSetSamplerPayload)) return false;
+    const auto* p = reinterpret_cast<const PSSetSamplerPayload*>(payload);
+    if (p->slot >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) {
+        std::cerr << "[ServerDispatcher] Invalid VS sampler slot: " << p->slot << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler = m_resources.GetSamplerState(p->res_id);
+    ID3D11SamplerState* p_sampler = sampler.Get();
+    context->VSSetSamplers(p->slot, 1, &p_sampler);
     return true;
 }
 

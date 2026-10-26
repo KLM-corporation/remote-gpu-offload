@@ -171,6 +171,13 @@ private:
     bool HandleDraw(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleDrawIndexed(const PacketHeader& header, const uint8_t* payload, size_t size);
 
+    // Instancing, multiple render targets, vertex shader resources
+    bool HandleDrawInstanced(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleDrawIndexedInstanced(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleOMSetRenderTargetsMrt(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleVSSetSrv(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleVSSetSampler(const PacketHeader& header, const uint8_t* payload, size_t size);
+
     // Fixed-function state handlers
     bool HandleCreateBlendState(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCreateDepthStencilState(const PacketHeader& header, const uint8_t* payload, size_t size);

@@ -90,6 +90,9 @@ enum RgpuOpcode : uint16_t {
     OP_OM_SET_DEPTH_STENCIL_STATE = 0x003D, // Client -> Server: Bind Depth-Stencil State (+ stencil ref)
     OP_RS_SET_STATE         = 0x003E, // Client -> Server: Bind Rasterizer State
     OP_RS_SET_SCISSOR       = 0x003F, // Client -> Server: Set scissor rectangle
+    OP_OM_SET_RENDER_TARGETS_MRT = 0x0040, // Client -> Server: Bind 0..8 RTVs + DSV (0 RTVs = depth-only)
+    OP_VS_SET_SRV           = 0x0041, // Client -> Server: Bind Shader Resource View to VS slot
+    OP_VS_SET_SAMPLER       = 0x0042, // Client -> Server: Bind Sampler State to VS slot
 
     // 4. Updates & Draw Calls (0x0050 - 0x006F)
     OP_UPDATE_SUBRESOURCE   = 0x0050, // Client -> Server: Update subresource memory
@@ -98,6 +101,8 @@ enum RgpuOpcode : uint16_t {
     OP_CLEAR_DSV            = 0x0053, // Client -> Server: Clear Depth Stencil View
     OP_DRAW                 = 0x0054, // Client -> Server: Draw non-indexed primitives
     OP_DRAW_INDEXED         = 0x0055, // Client -> Server: Draw indexed primitives
+    OP_DRAW_INSTANCED       = 0x0056, // Client -> Server: Draw instanced primitives
+    OP_DRAW_INDEXED_INSTANCED = 0x0057, // Client -> Server: Draw indexed instanced primitives
 
     // 5. Presentation & Streaming (0x0070 - 0x007F)
     OP_PRESENT              = 0x0070, // Client -> Server: End-of-frame present & readback trigger
@@ -208,8 +213,11 @@ struct CreateSrvPayload {
     uint32_t mip_levels;          // Number of mip levels (0xFFFFFFFF for all)
 };
 
-// Optional trailer after CreateSrvPayload (older clients omit it): the array range for
-// TEXTURE2DARRAY (first slice, slice count) and TEXTURECUBEARRAY (first face, cube count).
+// Optional trailer after CreateSrvPayload (older clients omit it). Every D3D11 SRV description
+// union is a sequence of UINTs, so {most_detailed_mip, mip_levels, first_array_slice, array_size}
+// carry the union's first four fields whatever the view dimension, e.g. BUFFER {FirstElement,
+// NumElements}, BUFFEREX {FirstElement, NumElements, Flags}, TEXTURE2DARRAY {MostDetailedMip,
+// MipLevels, FirstArraySlice, ArraySize}, TEXTURE2DMSARRAY {FirstArraySlice, ArraySize}.
 struct CreateSrvArrayRange {
     uint32_t first_array_slice;
     uint32_t array_size;
@@ -327,6 +335,12 @@ struct CreateRasterizerStatePayload {
 // =============================================================================
 // Pipeline State & Binding Payloads
 // =============================================================================
+
+struct OMSetRenderTargetsMrtPayload {
+    uint32_t num_rtvs;            // 0..8; slots past num_rtvs are unbound
+    uint32_t rtv_ids[8];          // Render Target View IDs (0: empty slot)
+    uint32_t dsv_id;              // Depth Stencil View ID (0: none)
+};
 
 struct OMSetBlendStatePayload {
     uint32_t res_id;              // Blend State ID (0: default state)
@@ -468,6 +482,21 @@ struct DrawIndexedPayload {
     int32_t  base_vertex_location;// Value added to each index before reading vertex
 };
 
+struct DrawInstancedPayload {
+    uint32_t vertex_count_per_instance;
+    uint32_t instance_count;
+    uint32_t start_vertex_location;
+    uint32_t start_instance_location;
+};
+
+struct DrawIndexedInstancedPayload {
+    uint32_t index_count_per_instance;
+    uint32_t instance_count;
+    uint32_t start_index_location;
+    int32_t  base_vertex_location;
+    uint32_t start_instance_location;
+};
+
 // =============================================================================
 // Presentation & Frame Return Payloads
 // =============================================================================
@@ -561,6 +590,9 @@ static_assert(sizeof(ClearRtvPayload) == 20);
 static_assert(sizeof(ClearDsvPayload) == 16);
 static_assert(sizeof(DrawPayload) == 8);
 static_assert(sizeof(DrawIndexedPayload) == 12);
+static_assert(sizeof(DrawInstancedPayload) == 16);
+static_assert(sizeof(DrawIndexedInstancedPayload) == 20);
+static_assert(sizeof(OMSetRenderTargetsMrtPayload) == 40);
 
 static_assert(sizeof(PresentPayload) == 20);
 static_assert(sizeof(FrameDataPayload) == 32);

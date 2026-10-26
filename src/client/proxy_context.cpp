@@ -112,6 +112,20 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::PSSetShaderResources(UINT StartS
     }
 }
 
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::VSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
+    for (UINT i = 0; i < NumViews; ++i) {
+        PSSetSrvPayload p = {StartSlot + i, ppShaderResourceViews ? GetResourceIdFromCOM(ppShaderResourceViews[i]) : 0};
+        Send(OP_VS_SET_SRV, &p, sizeof(p));
+    }
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::VSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
+    for (UINT i = 0; i < NumSamplers; ++i) {
+        PSSetSamplerPayload p = {StartSlot + i, ppSamplers ? GetResourceIdFromCOM(ppSamplers[i]) : 0};
+        Send(OP_VS_SET_SAMPLER, &p, sizeof(p));
+    }
+}
+
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::PSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
     for (UINT i = 0; i < NumSamplers; ++i) {
         PSSetSamplerPayload p = {StartSlot + i, ppSamplers ? GetResourceIdFromCOM(ppSamplers[i]) : 0};
@@ -132,10 +146,20 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::RSSetViewports(UINT NumViewports
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetRenderTargets(UINT NumViews, ID3D11RenderTargetView* const* ppRenderTargetViews,
                                                                    ID3D11DepthStencilView* pDepthStencilView) {
-    OMSetRenderTargetsPayload p = {};
-    p.rtv_id = (NumViews > 0 && ppRenderTargetViews) ? GetResourceIdFromCOM(ppRenderTargetViews[0]) : 0;
+    if (NumViews == 1 && ppRenderTargetViews) {
+        // Common case: the original single-RTV opcode, understood by every server version.
+        OMSetRenderTargetsPayload p = {};
+        p.rtv_id = GetResourceIdFromCOM(ppRenderTargetViews[0]);
+        p.dsv_id = GetResourceIdFromCOM(pDepthStencilView);
+        Send(OP_OM_SET_RENDER_TARGETS, &p, sizeof(p));
+        return;
+    }
+    // Several targets, or none (depth-only pass): the single-RTV opcode would bind the back buffer.
+    OMSetRenderTargetsMrtPayload p = {};
+    p.num_rtvs = (std::min)(NumViews, static_cast<UINT>(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT));
+    for (UINT i = 0; i < p.num_rtvs; ++i) p.rtv_ids[i] = ppRenderTargetViews ? GetResourceIdFromCOM(ppRenderTargetViews[i]) : 0;
     p.dsv_id = GetResourceIdFromCOM(pDepthStencilView);
-    Send(OP_OM_SET_RENDER_TARGETS, &p, sizeof(p));
+    Send(OP_OM_SET_RENDER_TARGETS_MRT, &p, sizeof(p));
 }
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(
@@ -202,6 +226,20 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Draw(UINT VertexCount, UINT Star
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation) {
     DrawIndexedPayload p = {IndexCount, StartIndexLocation, BaseVertexLocation};
     Send(OP_DRAW_INDEXED, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount,
+                                                              UINT StartVertexLocation, UINT StartInstanceLocation) {
+    DrawInstancedPayload p = {VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation};
+    Send(OP_DRAW_INSTANCED, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount,
+                                                                     UINT StartIndexLocation, INT BaseVertexLocation,
+                                                                     UINT StartInstanceLocation) {
+    DrawIndexedInstancedPayload p = {IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
+                                     StartInstanceLocation};
+    Send(OP_DRAW_INDEXED_INSTANCED, &p, sizeof(p));
 }
 
 // =============================================================================
