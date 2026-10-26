@@ -145,6 +145,31 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetRenderTargetsAndUnorderedAc
     }
 }
 
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetBlendState(ID3D11BlendState* pBlendState, const FLOAT BlendFactor[4],
+                                                                UINT SampleMask) {
+    OMSetBlendStatePayload p = {};
+    p.res_id = GetResourceIdFromCOM(pBlendState); // 0: default state
+    for (int i = 0; i < 4; ++i) p.blend_factor[i] = BlendFactor ? BlendFactor[i] : 1.0f;
+    p.sample_mask = SampleMask;
+    Send(OP_OM_SET_BLEND_STATE, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetDepthStencilState(ID3D11DepthStencilState* pDepthStencilState, UINT StencilRef) {
+    OMSetDepthStencilStatePayload p = {GetResourceIdFromCOM(pDepthStencilState), StencilRef};
+    Send(OP_OM_SET_DEPTH_STENCIL_STATE, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::RSSetState(ID3D11RasterizerState* pRasterizerState) {
+    RSSetStatePayload p = {GetResourceIdFromCOM(pRasterizerState)};
+    Send(OP_RS_SET_STATE, &p, sizeof(p));
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::RSSetScissorRects(UINT NumRects, const D3D11_RECT* pRects) {
+    RSSetScissorPayload p = {}; // no rectangle: an empty scissor, as in D3D11
+    if (NumRects > 0 && pRects) p = {pRects[0].left, pRects[0].top, pRects[0].right, pRects[0].bottom};
+    Send(OP_RS_SET_SCISSOR, &p, sizeof(p));
+}
+
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::ClearRenderTargetView(ID3D11RenderTargetView* pRenderTargetView, const FLOAT ColorRGBA[4]) {
     if (!pRenderTargetView || !ColorRGBA) return;
     ClearRtvPayload p = {};

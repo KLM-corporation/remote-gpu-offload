@@ -11,16 +11,12 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11DeviceContext::GetData(ID3D11Asynchronous *,
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::SetPredication(ID3D11Predicate *, WINBOOL) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GSSetShaderResources(UINT, UINT, ID3D11ShaderResourceView *const *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GSSetSamplers(UINT, UINT, ID3D11SamplerState *const *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetBlendState(ID3D11BlendState *, const FLOAT[4], UINT) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetDepthStencilState(ID3D11DepthStencilState *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::SOSetTargets(UINT, ID3D11Buffer *const *, const UINT *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawAuto() {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawIndexedInstancedIndirect(ID3D11Buffer *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DrawInstancedIndirect(ID3D11Buffer *, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::Dispatch(UINT, UINT, UINT) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DispatchIndirect(ID3D11Buffer *, UINT) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::RSSetState(ID3D11RasterizerState *) {}
-void STDMETHODCALLTYPE ProxyD3D11DeviceContext::RSSetScissorRects(UINT, const D3D11_RECT *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopySubresourceRegion(ID3D11Resource *, UINT, UINT, UINT, UINT, ID3D11Resource *, UINT, const D3D11_BOX *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyResource(ID3D11Resource *, ID3D11Resource *) {}
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::CopyStructureCount(ID3D11Buffer *, UINT, ID3D11UnorderedAccessView *) {}

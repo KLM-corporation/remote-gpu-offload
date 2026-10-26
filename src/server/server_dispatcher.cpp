@@ -154,6 +154,12 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleCreateInputLayout(header, payload, payload_size);
         case OP_CREATE_SAMPLER:
             return HandleCreateSampler(header, payload, payload_size);
+        case OP_CREATE_BLEND_STATE:
+            return HandleCreateBlendState(header, payload, payload_size);
+        case OP_CREATE_DEPTH_STENCIL_STATE:
+            return HandleCreateDepthStencilState(header, payload, payload_size);
+        case OP_CREATE_RASTERIZER_STATE:
+            return HandleCreateRasterizerState(header, payload, payload_size);
         case OP_DESTROY_RESOURCE:
             return HandleDestroyResource(header, payload, payload_size);
 
@@ -182,6 +188,14 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleRSSetViewport(header, payload, payload_size);
         case OP_OM_SET_RENDER_TARGETS:
             return HandleOMSetRenderTargets(header, payload, payload_size);
+        case OP_OM_SET_BLEND_STATE:
+            return HandleOMSetBlendState(header, payload, payload_size);
+        case OP_OM_SET_DEPTH_STENCIL_STATE:
+            return HandleOMSetDepthStencilState(header, payload, payload_size);
+        case OP_RS_SET_STATE:
+            return HandleRSSetState(header, payload, payload_size);
+        case OP_RS_SET_SCISSOR:
+            return HandleRSSetScissor(header, payload, payload_size);
 
         // 4. Updates & Draw Calls
         case OP_UPDATE_SUBRESOURCE:
@@ -1326,6 +1340,203 @@ bool ServerDispatcher::HandleDrawIndexed(const PacketHeader& /*header*/, const u
     if (!context) return false;
 
     context->DrawIndexed(p->index_count, p->start_index_location, p->base_vertex_location);
+    return true;
+}
+
+// =============================================================================
+// Fixed-Function State Handlers (blend, depth-stencil, rasterizer, scissor)
+// =============================================================================
+
+namespace {
+
+bool ValidBlend(uint32_t v) { return v >= D3D11_BLEND_ZERO && v <= D3D11_BLEND_INV_SRC1_ALPHA && v != 12 && v != 13; }
+bool ValidBlendOp(uint32_t v) { return v >= D3D11_BLEND_OP_ADD && v <= D3D11_BLEND_OP_MAX; }
+bool ValidComparison(uint32_t v) { return v >= D3D11_COMPARISON_NEVER && v <= D3D11_COMPARISON_ALWAYS; }
+bool ValidStencilOp(uint32_t v) { return v >= D3D11_STENCIL_OP_KEEP && v <= D3D11_STENCIL_OP_DECR; }
+
+bool ValidStencilFace(const RgpuStencilOpDesc& f) {
+    return ValidStencilOp(f.fail_op) && ValidStencilOp(f.depth_fail_op) && ValidStencilOp(f.pass_op) && ValidComparison(f.func);
+}
+
+D3D11_DEPTH_STENCILOP_DESC ToStencilFace(const RgpuStencilOpDesc& f) {
+    D3D11_DEPTH_STENCILOP_DESC d;
+    d.StencilFailOp = static_cast<D3D11_STENCIL_OP>(f.fail_op);
+    d.StencilDepthFailOp = static_cast<D3D11_STENCIL_OP>(f.depth_fail_op);
+    d.StencilPassOp = static_cast<D3D11_STENCIL_OP>(f.pass_op);
+    d.StencilFunc = static_cast<D3D11_COMPARISON_FUNC>(f.func);
+    return d;
+}
+
+} // namespace
+
+bool ServerDispatcher::HandleCreateBlendState(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateBlendStatePayload)) {
+        std::cerr << "[ServerDispatcher] CreateBlendState payload too small: " << size << std::endl;
+        return false;
+    }
+    const auto* p = reinterpret_cast<const CreateBlendStatePayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateBlendState: invalid res_id=0" << std::endl;
+        return false;
+    }
+
+    D3D11_BLEND_DESC desc = {};
+    desc.AlphaToCoverageEnable = p->alpha_to_coverage ? TRUE : FALSE;
+    desc.IndependentBlendEnable = p->independent_blend ? TRUE : FALSE;
+    for (int i = 0; i < 8; ++i) {
+        const RgpuRenderTargetBlend& s = p->render_target[i];
+        if (!ValidBlend(s.src_blend) || !ValidBlend(s.dest_blend) || !ValidBlend(s.src_blend_alpha) ||
+            !ValidBlend(s.dest_blend_alpha) || !ValidBlendOp(s.blend_op) || !ValidBlendOp(s.blend_op_alpha) ||
+            s.write_mask > D3D11_COLOR_WRITE_ENABLE_ALL) {
+            std::cerr << "[ServerDispatcher] CreateBlendState: invalid render target " << i << " description" << std::endl;
+            return false;
+        }
+        D3D11_RENDER_TARGET_BLEND_DESC& d = desc.RenderTarget[i];
+        d.BlendEnable = s.blend_enable ? TRUE : FALSE;
+        d.SrcBlend = static_cast<D3D11_BLEND>(s.src_blend);
+        d.DestBlend = static_cast<D3D11_BLEND>(s.dest_blend);
+        d.BlendOp = static_cast<D3D11_BLEND_OP>(s.blend_op);
+        d.SrcBlendAlpha = static_cast<D3D11_BLEND>(s.src_blend_alpha);
+        d.DestBlendAlpha = static_cast<D3D11_BLEND>(s.dest_blend_alpha);
+        d.BlendOpAlpha = static_cast<D3D11_BLEND_OP>(s.blend_op_alpha);
+        d.RenderTargetWriteMask = static_cast<UINT8>(s.write_mask);
+    }
+
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+    Microsoft::WRL::ComPtr<ID3D11BlendState> state;
+    HRESULT hr = device->CreateBlendState(&desc, &state);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateBlendState failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+    m_resources.Register(p->res_id, state);
+    return true;
+}
+
+bool ServerDispatcher::HandleCreateDepthStencilState(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateDepthStencilStatePayload)) {
+        std::cerr << "[ServerDispatcher] CreateDepthStencilState payload too small: " << size << std::endl;
+        return false;
+    }
+    const auto* p = reinterpret_cast<const CreateDepthStencilStatePayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateDepthStencilState: invalid res_id=0" << std::endl;
+        return false;
+    }
+    if (p->depth_write_mask > D3D11_DEPTH_WRITE_MASK_ALL || !ValidComparison(p->depth_func) ||
+        !ValidStencilFace(p->front_face) || !ValidStencilFace(p->back_face)) {
+        std::cerr << "[ServerDispatcher] CreateDepthStencilState: invalid description" << std::endl;
+        return false;
+    }
+
+    D3D11_DEPTH_STENCIL_DESC desc = {};
+    desc.DepthEnable = p->depth_enable ? TRUE : FALSE;
+    desc.DepthWriteMask = static_cast<D3D11_DEPTH_WRITE_MASK>(p->depth_write_mask);
+    desc.DepthFunc = static_cast<D3D11_COMPARISON_FUNC>(p->depth_func);
+    desc.StencilEnable = p->stencil_enable ? TRUE : FALSE;
+    desc.StencilReadMask = static_cast<UINT8>(p->stencil_read_mask);
+    desc.StencilWriteMask = static_cast<UINT8>(p->stencil_write_mask);
+    desc.FrontFace = ToStencilFace(p->front_face);
+    desc.BackFace = ToStencilFace(p->back_face);
+
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> state;
+    HRESULT hr = device->CreateDepthStencilState(&desc, &state);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateDepthStencilState failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+    m_resources.Register(p->res_id, state);
+    return true;
+}
+
+bool ServerDispatcher::HandleCreateRasterizerState(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateRasterizerStatePayload)) {
+        std::cerr << "[ServerDispatcher] CreateRasterizerState payload too small: " << size << std::endl;
+        return false;
+    }
+    const auto* p = reinterpret_cast<const CreateRasterizerStatePayload*>(payload);
+    if (p->res_id == 0) {
+        std::cerr << "[ServerDispatcher] CreateRasterizerState: invalid res_id=0" << std::endl;
+        return false;
+    }
+    if ((p->fill_mode != D3D11_FILL_WIREFRAME && p->fill_mode != D3D11_FILL_SOLID) ||
+        p->cull_mode < D3D11_CULL_NONE || p->cull_mode > D3D11_CULL_BACK ||
+        !std::isfinite(p->depth_bias_clamp) || !std::isfinite(p->slope_scaled_depth_bias)) {
+        std::cerr << "[ServerDispatcher] CreateRasterizerState: invalid description (fill=" << p->fill_mode
+                  << ", cull=" << p->cull_mode << ")" << std::endl;
+        return false;
+    }
+
+    D3D11_RASTERIZER_DESC desc = {};
+    desc.FillMode = static_cast<D3D11_FILL_MODE>(p->fill_mode);
+    desc.CullMode = static_cast<D3D11_CULL_MODE>(p->cull_mode);
+    desc.FrontCounterClockwise = p->front_counter_clockwise ? TRUE : FALSE;
+    desc.DepthBias = p->depth_bias;
+    desc.DepthBiasClamp = p->depth_bias_clamp;
+    desc.SlopeScaledDepthBias = p->slope_scaled_depth_bias;
+    desc.DepthClipEnable = p->depth_clip_enable ? TRUE : FALSE;
+    desc.ScissorEnable = p->scissor_enable ? TRUE : FALSE;
+    desc.MultisampleEnable = p->multisample_enable ? TRUE : FALSE;
+    desc.AntialiasedLineEnable = p->antialiased_line_enable ? TRUE : FALSE;
+
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> state;
+    HRESULT hr = device->CreateRasterizerState(&desc, &state);
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] CreateRasterizerState failed: 0x" << std::hex << hr << std::dec
+                  << " (res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+    m_resources.Register(p->res_id, state);
+    return true;
+}
+
+bool ServerDispatcher::HandleOMSetBlendState(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(OMSetBlendStatePayload)) return false;
+    const auto* p = reinterpret_cast<const OMSetBlendStatePayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    // An unknown id falls back to the default state, like a null state in D3D11.
+    Microsoft::WRL::ComPtr<ID3D11BlendState> state = m_resources.Get<ID3D11BlendState>(p->res_id);
+    float factor[4];
+    for (int i = 0; i < 4; ++i) factor[i] = std::isfinite(p->blend_factor[i]) ? p->blend_factor[i] : 1.0f;
+    context->OMSetBlendState(state.Get(), factor, p->sample_mask);
+    return true;
+}
+
+bool ServerDispatcher::HandleOMSetDepthStencilState(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(OMSetDepthStencilStatePayload)) return false;
+    const auto* p = reinterpret_cast<const OMSetDepthStencilStatePayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> state = m_resources.Get<ID3D11DepthStencilState>(p->res_id);
+    context->OMSetDepthStencilState(state.Get(), p->stencil_ref & 0xFF);
+    return true;
+}
+
+bool ServerDispatcher::HandleRSSetState(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(RSSetStatePayload)) return false;
+    const auto* p = reinterpret_cast<const RSSetStatePayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> state = m_resources.Get<ID3D11RasterizerState>(p->res_id);
+    context->RSSetState(state.Get());
+    return true;
+}
+
+bool ServerDispatcher::HandleRSSetScissor(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(RSSetScissorPayload)) return false;
+    const auto* p = reinterpret_cast<const RSSetScissorPayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    const D3D11_RECT rect = {p->left, p->top, p->right, p->bottom};
+    context->RSSetScissorRects(1, &rect);
     return true;
 }
 

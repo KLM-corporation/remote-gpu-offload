@@ -13,6 +13,7 @@ IMPLEMENTED = {
     "IASetInputLayout", "IASetVertexBuffers", "IASetIndexBuffer", "IASetPrimitiveTopology",
     "RSSetViewports", "OMSetRenderTargets", "OMSetRenderTargetsAndUnorderedAccessViews",
     "ClearRenderTargetView", "ClearDepthStencilView", "UpdateSubresource", "Flush", "ClearState",
+    "OMSetBlendState", "OMSetDepthStencilState", "RSSetState", "RSSetScissorRects",
 }
 
 src = open(sys.argv[1], encoding="utf-8", errors="replace").read()

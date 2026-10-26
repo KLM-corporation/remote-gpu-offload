@@ -10,6 +10,7 @@ Stages (all must pass for exit code 0):
   test_server_fuzz dispatcher fuzzing
   client_proxy     proxy DLL against a live server (tests/test_client_proxy.cpp)
   dxgi_proxy       dxgi.dll factory/adapter path, ResizeBuffers (tests/test_dxgi_proxy.cpp)
+  render_states    blend / depth-stencil / rasterizer / scissor forwarding, checked on pixels
   real_app_compat  Microsoft D3D11 tutorials through the proxy (skipped if not fetched)
   loopback_e2e     sample app through the proxy for 60 frames + pixel verification
   fault_tolerance  disconnects, idle session and multi-session leak check
@@ -40,6 +41,7 @@ TEST_BUILDS = {
     "test_server_fuzz": ["-Isrc/common", "-Isrc/server", *SERVER_SRC, "tests/test_server_fuzz.cpp", *SERVER_LIBS],
     "test_client_proxy": ["tests/test_client_proxy.cpp", "-ld3dcompiler", "-luser32", "-lgdi32", "-ldxguid"],
     "test_dxgi_proxy": ["tests/test_dxgi_proxy.cpp", "-luser32", "-ldxguid", "-luuid"],
+    "test_render_states": ["tests/test_render_states.cpp", "-ld3dcompiler", "-luser32", "-ldxguid"],
 }
 
 
@@ -63,7 +65,7 @@ def stage_build():
         cmd = [compiler, "-std=c++17", "-O2", *args, "-o", str(GATE / f"{name}.exe")]
         if subprocess.run(cmd, cwd=ROOT, capture_output=True).returncode != 0:
             return False, f"{name} failed to compile"
-    return True, "server, proxy DLL, sample and 6 test executables"
+    return True, "server, proxy DLL, sample and 7 test executables"
 
 
 def stage_against_server(test, args, port, single_session=True):
@@ -106,6 +108,9 @@ def main(argv=None):
         # The factory probes the server once before the device connects: two sessions.
         ("dxgi_proxy", lambda: stage_against_server("test_dxgi_proxy", [str(BUILD / "client")], args.port + 2,
                                                     single_session=False)),
+        # One session per scenario.
+        ("render_states", lambda: stage_against_server("test_render_states", [str(BUILD / "client" / "d3d11.dll")],
+                                                       args.port + 4, single_session=False)),
         ("real_app_compat", lambda: stage_compat(args.port + 3)),
         ("loopback_e2e", lambda: (run_loopback_test.main(["--port", str(args.port + 1), "--frames", "60"]) == 0,
                                   "see build/loopback_artifacts")),

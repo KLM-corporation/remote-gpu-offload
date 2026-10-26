@@ -12,14 +12,13 @@ namespace RemoteGPU {
 
 namespace {
 
-// Stateless pipeline-state objects (blend / depth-stencil / rasterizer) have no wire opcode.
-// The host dispatcher renders with its own defaults, so the client only needs a valid COM
-// object that reports back the description the application supplied.
+// Fixed-function state objects (blend / depth-stencil / rasterizer): created on the host under
+// res_id and bound by the context; GetDesc reports the description the application supplied.
 template <typename Iface, typename Desc>
 class ProxyStateObject : public Iface, public ProxyResourceBase {
 public:
-    ProxyStateObject(const Desc& desc, ProxyD3D11Device* device)
-        : ProxyResourceBase(0, device), m_desc(desc) {}
+    ProxyStateObject(uint32_t res_id, const Desc& desc, ProxyD3D11Device* device)
+        : ProxyResourceBase(res_id, device), m_desc(desc) {}
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -403,29 +402,119 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateSamplerState(const D3D11_SAMPL
 }
 
 // =============================================================================
-// Pipeline-state objects (client-side only) and unsupported creation
+// Fixed-function state objects
 // =============================================================================
+// D3D11 ignores the fields of disabled features (render targets 1-7 without independent
+// blending, blend factors when blending is off, stencil ops when stencil is off) and
+// applications often leave them zeroed. Those fields are normalised to valid defaults before
+// sending, because the host validates every enum it receives.
+
+namespace {
+
+bool ValidBlend(D3D11_BLEND v) { return v >= D3D11_BLEND_ZERO && v <= D3D11_BLEND_INV_SRC1_ALPHA && v != 12 && v != 13; }
+bool ValidBlendOp(D3D11_BLEND_OP v) { return v >= D3D11_BLEND_OP_ADD && v <= D3D11_BLEND_OP_MAX; }
+bool ValidComparison(D3D11_COMPARISON_FUNC v) { return v >= D3D11_COMPARISON_NEVER && v <= D3D11_COMPARISON_ALWAYS; }
+bool ValidStencilOp(D3D11_STENCIL_OP v) { return v >= D3D11_STENCIL_OP_KEEP && v <= D3D11_STENCIL_OP_DECR; }
+
+RgpuStencilOpDesc ToWire(const D3D11_DEPTH_STENCILOP_DESC& f, bool enabled) {
+    if (!enabled) return {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS};
+    return {static_cast<uint32_t>(f.StencilFailOp), static_cast<uint32_t>(f.StencilDepthFailOp),
+            static_cast<uint32_t>(f.StencilPassOp), static_cast<uint32_t>(f.StencilFunc)};
+}
+
+bool ValidStencilFace(const D3D11_DEPTH_STENCILOP_DESC& f) {
+    return ValidStencilOp(f.StencilFailOp) && ValidStencilOp(f.StencilDepthFailOp) &&
+           ValidStencilOp(f.StencilPassOp) && ValidComparison(f.StencilFunc);
+}
+
+} // namespace
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateBlendState(const D3D11_BLEND_DESC* pDesc, ID3D11BlendState** pp) {
     if (!pDesc) return E_INVALIDARG;
+
+    CreateBlendStatePayload p = {};
+    p.alpha_to_coverage = pDesc->AlphaToCoverageEnable ? 1 : 0;
+    p.independent_blend = pDesc->IndependentBlendEnable ? 1 : 0;
+    for (int i = 0; i < 8; ++i) {
+        const D3D11_RENDER_TARGET_BLEND_DESC& s = pDesc->RenderTarget[pDesc->IndependentBlendEnable ? i : 0];
+        RgpuRenderTargetBlend& d = p.render_target[i];
+        if (s.RenderTargetWriteMask > D3D11_COLOR_WRITE_ENABLE_ALL) return E_INVALIDARG;
+        d.write_mask = s.RenderTargetWriteMask;
+        d.blend_enable = s.BlendEnable ? 1 : 0;
+        if (s.BlendEnable) {
+            if (!ValidBlend(s.SrcBlend) || !ValidBlend(s.DestBlend) || !ValidBlend(s.SrcBlendAlpha) ||
+                !ValidBlend(s.DestBlendAlpha) || !ValidBlendOp(s.BlendOp) || !ValidBlendOp(s.BlendOpAlpha)) {
+                return E_INVALIDARG;
+            }
+            d.src_blend = s.SrcBlend;
+            d.dest_blend = s.DestBlend;
+            d.blend_op = s.BlendOp;
+            d.src_blend_alpha = s.SrcBlendAlpha;
+            d.dest_blend_alpha = s.DestBlendAlpha;
+            d.blend_op_alpha = s.BlendOpAlpha;
+        } else {
+            d.src_blend = d.src_blend_alpha = D3D11_BLEND_ONE;
+            d.dest_blend = d.dest_blend_alpha = D3D11_BLEND_ZERO;
+            d.blend_op = d.blend_op_alpha = D3D11_BLEND_OP_ADD;
+        }
+    }
     if (!pp) return S_FALSE;
-    *pp = new ProxyStateObject<ID3D11BlendState, D3D11_BLEND_DESC>(*pDesc, this);
+
+    p.res_id = AllocateResourceId();
+    if (!SendCommand(OP_CREATE_BLEND_STATE, &p, sizeof(p), FLAG_ONEWAY)) return DXGI_ERROR_DEVICE_REMOVED;
+    *pp = new ProxyStateObject<ID3D11BlendState, D3D11_BLEND_DESC>(p.res_id, *pDesc, this);
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateDepthStencilState(const D3D11_DEPTH_STENCIL_DESC* pDesc,
                                                                     ID3D11DepthStencilState** pp) {
     if (!pDesc) return E_INVALIDARG;
+    if (pDesc->DepthWriteMask > D3D11_DEPTH_WRITE_MASK_ALL) return E_INVALIDARG;
+    if (pDesc->DepthEnable && !ValidComparison(pDesc->DepthFunc)) return E_INVALIDARG;
+    if (pDesc->StencilEnable && (!ValidStencilFace(pDesc->FrontFace) || !ValidStencilFace(pDesc->BackFace)))
+        return E_INVALIDARG;
+
+    CreateDepthStencilStatePayload p = {};
+    p.depth_enable = pDesc->DepthEnable ? 1 : 0;
+    p.depth_write_mask = pDesc->DepthWriteMask;
+    p.depth_func = pDesc->DepthEnable ? pDesc->DepthFunc : D3D11_COMPARISON_LESS;
+    p.stencil_enable = pDesc->StencilEnable ? 1 : 0;
+    p.stencil_read_mask = pDesc->StencilReadMask;
+    p.stencil_write_mask = pDesc->StencilWriteMask;
+    p.front_face = ToWire(pDesc->FrontFace, pDesc->StencilEnable);
+    p.back_face = ToWire(pDesc->BackFace, pDesc->StencilEnable);
     if (!pp) return S_FALSE;
-    *pp = new ProxyStateObject<ID3D11DepthStencilState, D3D11_DEPTH_STENCIL_DESC>(*pDesc, this);
+
+    p.res_id = AllocateResourceId();
+    if (!SendCommand(OP_CREATE_DEPTH_STENCIL_STATE, &p, sizeof(p), FLAG_ONEWAY)) return DXGI_ERROR_DEVICE_REMOVED;
+    *pp = new ProxyStateObject<ID3D11DepthStencilState, D3D11_DEPTH_STENCIL_DESC>(p.res_id, *pDesc, this);
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateRasterizerState(const D3D11_RASTERIZER_DESC* pDesc,
                                                                   ID3D11RasterizerState** pp) {
     if (!pDesc) return E_INVALIDARG;
+    if ((pDesc->FillMode != D3D11_FILL_WIREFRAME && pDesc->FillMode != D3D11_FILL_SOLID) ||
+        pDesc->CullMode < D3D11_CULL_NONE || pDesc->CullMode > D3D11_CULL_BACK) {
+        return E_INVALIDARG;
+    }
+
+    CreateRasterizerStatePayload p = {};
+    p.fill_mode = pDesc->FillMode;
+    p.cull_mode = pDesc->CullMode;
+    p.front_counter_clockwise = pDesc->FrontCounterClockwise ? 1 : 0;
+    p.depth_bias = pDesc->DepthBias;
+    p.depth_bias_clamp = pDesc->DepthBiasClamp;
+    p.slope_scaled_depth_bias = pDesc->SlopeScaledDepthBias;
+    p.depth_clip_enable = pDesc->DepthClipEnable ? 1 : 0;
+    p.scissor_enable = pDesc->ScissorEnable ? 1 : 0;
+    p.multisample_enable = pDesc->MultisampleEnable ? 1 : 0;
+    p.antialiased_line_enable = pDesc->AntialiasedLineEnable ? 1 : 0;
     if (!pp) return S_FALSE;
-    *pp = new ProxyStateObject<ID3D11RasterizerState, D3D11_RASTERIZER_DESC>(*pDesc, this);
+
+    p.res_id = AllocateResourceId();
+    if (!SendCommand(OP_CREATE_RASTERIZER_STATE, &p, sizeof(p), FLAG_ONEWAY)) return DXGI_ERROR_DEVICE_REMOVED;
+    *pp = new ProxyStateObject<ID3D11RasterizerState, D3D11_RASTERIZER_DESC>(p.res_id, *pDesc, this);
     return S_OK;
 }
 

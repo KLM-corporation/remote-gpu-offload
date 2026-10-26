@@ -69,6 +69,9 @@ enum RgpuOpcode : uint16_t {
     OP_CREATE_INPUT_LAYOUT  = 0x0017, // Client -> Server: Create Input Layout from element descs
     OP_DESTROY_RESOURCE     = 0x0018, // Client -> Server: Release GPU resource by res_id
     OP_CREATE_SAMPLER       = 0x0019, // Client -> Server: Create Sampler State (Texture filtering)
+    OP_CREATE_BLEND_STATE   = 0x001A, // Client -> Server: Create Blend State (transparency)
+    OP_CREATE_DEPTH_STENCIL_STATE = 0x001B, // Client -> Server: Create Depth-Stencil State
+    OP_CREATE_RASTERIZER_STATE    = 0x001C, // Client -> Server: Create Rasterizer State (culling, fill, scissor)
 
     // 3. Pipeline State & Binding (0x0030 - 0x004F)
     OP_IA_SET_INPUT_LAYOUT  = 0x0030, // Client -> Server: Bind Input Layout to IA stage
@@ -83,6 +86,10 @@ enum RgpuOpcode : uint16_t {
     OP_RS_SET_VIEWPORT      = 0x0039, // Client -> Server: Set Rasterizer Viewport
     OP_OM_SET_RENDER_TARGETS= 0x003A, // Client -> Server: Bind RTVs & DSV to Output Merger
     OP_PS_SET_SAMPLER       = 0x003B, // Client -> Server: Bind Sampler State to PS slot
+    OP_OM_SET_BLEND_STATE   = 0x003C, // Client -> Server: Bind Blend State (+ blend factor, sample mask)
+    OP_OM_SET_DEPTH_STENCIL_STATE = 0x003D, // Client -> Server: Bind Depth-Stencil State (+ stencil ref)
+    OP_RS_SET_STATE         = 0x003E, // Client -> Server: Bind Rasterizer State
+    OP_RS_SET_SCISSOR       = 0x003F, // Client -> Server: Set scissor rectangle
 
     // 4. Updates & Draw Calls (0x0050 - 0x006F)
     OP_UPDATE_SUBRESOURCE   = 0x0050, // Client -> Server: Update subresource memory
@@ -242,9 +249,83 @@ struct CreateSamplerPayload {
     float    max_lod;             // Maximum LOD (3.402823466e+38f)
 };
 
+// Fixed-function state objects. Fields carry the D3D11 enum values unchanged.
+struct RgpuRenderTargetBlend {
+    uint32_t blend_enable;
+    uint32_t src_blend;           // D3D11_BLEND (1..19)
+    uint32_t dest_blend;
+    uint32_t blend_op;            // D3D11_BLEND_OP (1..5)
+    uint32_t src_blend_alpha;
+    uint32_t dest_blend_alpha;
+    uint32_t blend_op_alpha;
+    uint32_t write_mask;          // D3D11_COLOR_WRITE_ENABLE bits (0..15)
+};
+
+struct CreateBlendStatePayload {
+    uint32_t res_id;
+    uint32_t alpha_to_coverage;
+    uint32_t independent_blend;
+    RgpuRenderTargetBlend render_target[8];
+};
+
+struct RgpuStencilOpDesc {
+    uint32_t fail_op;             // D3D11_STENCIL_OP (1..8)
+    uint32_t depth_fail_op;
+    uint32_t pass_op;
+    uint32_t func;                // D3D11_COMPARISON_FUNC (1..8)
+};
+
+struct CreateDepthStencilStatePayload {
+    uint32_t res_id;
+    uint32_t depth_enable;
+    uint32_t depth_write_mask;    // 0: ZERO, 1: ALL
+    uint32_t depth_func;          // D3D11_COMPARISON_FUNC (1..8)
+    uint32_t stencil_enable;
+    uint32_t stencil_read_mask;   // low 8 bits used
+    uint32_t stencil_write_mask;  // low 8 bits used
+    RgpuStencilOpDesc front_face;
+    RgpuStencilOpDesc back_face;
+};
+
+struct CreateRasterizerStatePayload {
+    uint32_t res_id;
+    uint32_t fill_mode;           // 2: WIREFRAME, 3: SOLID
+    uint32_t cull_mode;           // 1: NONE, 2: FRONT, 3: BACK
+    uint32_t front_counter_clockwise;
+    int32_t  depth_bias;
+    float    depth_bias_clamp;
+    float    slope_scaled_depth_bias;
+    uint32_t depth_clip_enable;
+    uint32_t scissor_enable;
+    uint32_t multisample_enable;
+    uint32_t antialiased_line_enable;
+};
+
 // =============================================================================
 // Pipeline State & Binding Payloads
 // =============================================================================
+
+struct OMSetBlendStatePayload {
+    uint32_t res_id;              // Blend State ID (0: default state)
+    float    blend_factor[4];
+    uint32_t sample_mask;
+};
+
+struct OMSetDepthStencilStatePayload {
+    uint32_t res_id;              // Depth-Stencil State ID (0: default state)
+    uint32_t stencil_ref;
+};
+
+struct RSSetStatePayload {
+    uint32_t res_id;              // Rasterizer State ID (0: default state)
+};
+
+struct RSSetScissorPayload {
+    int32_t left;
+    int32_t top;
+    int32_t right;
+    int32_t bottom;
+};
 
 struct IASetInputLayoutPayload {
     uint32_t res_id;              // Input Layout ID (0 to unbind)
@@ -425,6 +506,15 @@ static_assert(sizeof(RgpuInputElementDesc) == 56);
 static_assert(sizeof(CreateInputLayoutPayload) == 12);
 static_assert(sizeof(DestroyResourcePayload) == 4);
 static_assert(sizeof(CreateSamplerPayload) == 56);
+static_assert(sizeof(RgpuRenderTargetBlend) == 32);
+static_assert(sizeof(CreateBlendStatePayload) == 268);
+static_assert(sizeof(RgpuStencilOpDesc) == 16);
+static_assert(sizeof(CreateDepthStencilStatePayload) == 60);
+static_assert(sizeof(CreateRasterizerStatePayload) == 44);
+static_assert(sizeof(OMSetBlendStatePayload) == 24);
+static_assert(sizeof(OMSetDepthStencilStatePayload) == 8);
+static_assert(sizeof(RSSetStatePayload) == 4);
+static_assert(sizeof(RSSetScissorPayload) == 16);
 
 static_assert(sizeof(IASetInputLayoutPayload) == 4);
 static_assert(sizeof(IASetVertexBufferPayload) == 16);

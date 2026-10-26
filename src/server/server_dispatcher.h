@@ -171,6 +171,15 @@ private:
     bool HandleDraw(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleDrawIndexed(const PacketHeader& header, const uint8_t* payload, size_t size);
 
+    // Fixed-function state handlers
+    bool HandleCreateBlendState(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCreateDepthStencilState(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCreateRasterizerState(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleOMSetBlendState(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleOMSetDepthStencilState(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleRSSetState(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleRSSetScissor(const PacketHeader& header, const uint8_t* payload, size_t size);
+
     // Presentation handlers
     bool HandleResizeBuffers(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandlePresent(const PacketHeader& header, const uint8_t* payload, size_t size, NetworkSocket* socket);
