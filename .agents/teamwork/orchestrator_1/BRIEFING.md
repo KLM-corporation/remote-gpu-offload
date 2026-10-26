@@ -64,19 +64,23 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | explorer_m2_1 | teamwork_preview_explorer | Milestone 2: GPU Device & Readback Spec | completed | 1ef135a0-b785-41b0-aeae-f0cf2e4a5131 |
 | explorer_m2_2 | teamwork_preview_explorer | Milestone 2: Server Dispatcher Spec | completed | 2dc0665d-b819-4974-8986-e11a5529263e |
 | explorer_m2_3 | teamwork_preview_explorer | Milestone 2: Server Main & Unit Test Spec | completed | 9d660238-dcc3-4b4a-921e-dde079778b39 |
-| worker_m2_1 | teamwork_preview_worker | Milestone 2: Implement gpu_device, server_dispatcher, main_server, test_server | in-progress | 77646538-b318-4e6a-8b1b-cf838a8768f5 |
+| worker_m2_1 | teamwork_preview_worker | Milestone 2: Implement gpu_device, server_dispatcher, main_server, test_server | completed | 77646538-b318-4e6a-8b1b-cf838a8768f5 |
+| reviewer_m2_1 | teamwork_preview_reviewer | Milestone 2: Review server correctness & readback | in-progress | 6ee1a773-ae13-49cf-bff9-85f7dfa94817 |
+| reviewer_m2_2 | teamwork_preview_reviewer | Milestone 2: Review R3/R4 requirements & lifecycle | in-progress | 429bdf2c-6dbe-4f72-b1c7-d2254bcd6cbf |
+| challenger_m2_1 | teamwork_preview_challenger | Milestone 2: Adversarial stress test disconnects & corrupt opcodes | in-progress | a346354e-8e13-4efd-880a-70afebcac075 |
+| challenger_m2_2 | teamwork_preview_challenger | Milestone 2: Benchmark multi-frame readback FPS & pitch stress | in-progress | ccb37369-e7ad-4b93-8e73-ce585f8dbfbd |
+| auditor_m2_1 | teamwork_preview_auditor | Milestone 2: Forensic integrity verification of host GPU execution | in-progress | 124d8c21-48a6-4122-ab1e-484fe9caa322 |
 
 ## Succession Status
-- Succession required: pending completion of worker_m2_1
-- Spawn count: 16 / 16
-- Pending subagents: 77646538-b318-4e6a-8b1b-cf838a8768f5
+- Succession required: no (singleton orchestrator)
+- Spawn count: 21 / 128
+- Pending subagents: 6ee1a773-ae13-49cf-bff9-85f7dfa94817, 429bdf2c-6dbe-4f72-b1c7-d2254bcd6cbf, a346354e-8e13-4efd-880a-70afebcac075, ccb37369-e7ad-4b93-8e73-ce585f8dbfbd, 124d8c21-48a6-4122-ab1e-484fe9caa322
 - Predecessor: none
-- Successor: not yet spawned
+- Successor: none
 
 ## Active Timers
-- Heartbeat cron: task-22 (*/10 * * * *)
+- Heartbeat cron: task-234 (*/10 * * * *)
 - Safety timer: none
-- On succession: kill all timers before spawning successor
 - On context truncation: run `manage_task(Action="list")` — re-create if missing
 
 ## Artifact Index
