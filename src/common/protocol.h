@@ -31,6 +31,23 @@ enum RgpuFlags : uint16_t {
     FLAG_HEARTBEAT         = 0x0020  // Heartbeat keep-alive probe
 };
 
+// HandshakeRequestPayload::client_flags bits. Unknown bits are ignored by the server, so a
+// client that sets none (older clients) keeps receiving uncompressed frames.
+enum RgpuClientFlags : uint32_t {
+    CLIENT_FLAG_NONE              = 0x0000,
+    CLIENT_FLAG_FRAME_COMPRESSION = 0x0001  // Client can decode OP_FRAME_DATA sent with FLAG_COMPRESSED
+};
+
+// Frame codecs used when OP_FRAME_DATA carries FLAG_COMPRESSED.
+enum RgpuFrameCodec : uint32_t {
+    FRAME_CODEC_RLE_DELTA = 1  // XOR prediction + zero-run/literal tokens (see frame_codec.h)
+};
+
+enum RgpuFrameMode : uint32_t {
+    FRAME_MODE_KEY   = 0,  // Each pixel predicted from its left neighbour; needs no previous frame
+    FRAME_MODE_DELTA = 1   // Each pixel predicted from the previous decoded frame
+};
+
 // =============================================================================
 // Direct3D 11 Command Opcodes (33 Total)
 // =============================================================================
@@ -367,6 +384,14 @@ struct FrameDataPayload {
     uint64_t frame_number;        // Monotonic server frame number matching PresentPayload
 };
 
+// With FLAG_COMPRESSED, FrameDataPayload is followed by this header and the codec token stream;
+// FrameDataPayload::data_size then counts both. Without the flag, raw pixels follow as before.
+struct CompressedFrameHeader {
+    uint32_t codec;               // RgpuFrameCodec
+    uint32_t mode;                // RgpuFrameMode
+    uint32_t raw_size;            // Decoded byte count (width * height * 4)
+};
+
 #pragma pack(pop)
 
 // =============================================================================
@@ -415,6 +440,7 @@ static_assert(sizeof(DrawIndexedPayload) == 12);
 
 static_assert(sizeof(PresentPayload) == 20);
 static_assert(sizeof(FrameDataPayload) == 32);
+static_assert(sizeof(CompressedFrameHeader) == 12);
 
 } // namespace RemoteGPU
 

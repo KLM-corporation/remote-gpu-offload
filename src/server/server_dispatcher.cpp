@@ -1,4 +1,5 @@
 #include "server_dispatcher.h"
+#include "frame_codec.h"
 
 #include <iostream>
 #include <cstring>
@@ -83,6 +84,10 @@ void ServerDispatcher::ResetSession() {
     m_frameWidth = 0;
     m_frameHeight = 0;
     m_lastPresentedFrame = 0;
+    // The compression flag is renegotiated by the next handshake. Byte counters, like the
+    // command/frame totals, survive so the session summary can still be logged after OP_SHUTDOWN.
+    m_previousFrame.clear();
+    m_encodedFrame.clear();
 }
 
 bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket) {
@@ -219,6 +224,8 @@ bool ServerDispatcher::HandleHandshakeRequest(const PacketHeader& header, const 
     m_clientProtocolVersion = req->protocol_version;
     m_frameWidth = req->client_width;
     m_frameHeight = req->client_height;
+    m_frameCompression = (req->client_flags & CLIENT_FLAG_FRAME_COMPRESSION) != 0;
+    m_previousFrame.clear(); // first frame of a session is always a key frame
 
     uint32_t status_code = 0; // 0: OK
     if (req->protocol_version != RGPU_PROTOCOL_VERSION) {
@@ -1340,12 +1347,26 @@ bool ServerDispatcher::HandlePresent(const PacketHeader& header, const uint8_t* 
     }
 
     if (socket && socket->IsValid()) {
+        // Compress when the client negotiated it and it actually saves bytes; otherwise send raw.
+        // Either way the client ends up holding exactly m_frameReadbackBuffer, which becomes the
+        // reference for the next delta frame.
+        const size_t pixel_count = static_cast<size_t>(width) * height;
+        const bool tightly_packed = (m_frameReadbackBuffer.size() == pixel_count * 4);
+        bool compressed = false;
+        if (m_frameCompression && tightly_packed) {
+            const bool has_reference = (m_previousFrame.size() == m_frameReadbackBuffer.size());
+            FrameCodec::Encode(m_frameReadbackBuffer.data(), has_reference ? m_previousFrame.data() : nullptr,
+                               pixel_count, m_encodedFrame);
+            compressed = m_encodedFrame.size() < m_frameReadbackBuffer.size();
+        }
+        const std::vector<uint8_t>& body = compressed ? m_encodedFrame : m_frameReadbackBuffer;
+
         PacketHeader resp_header = {};
         resp_header.magic = RGPU_MAGIC;
         resp_header.opcode = OP_FRAME_DATA;
-        resp_header.flags = FLAG_NONE;
+        resp_header.flags = compressed ? FLAG_COMPRESSED : FLAG_NONE;
         resp_header.sequence_id = header.sequence_id; // Sequence synchronization
-        resp_header.payload_length = static_cast<uint32_t>(sizeof(FrameDataPayload) + m_frameReadbackBuffer.size());
+        resp_header.payload_length = static_cast<uint32_t>(sizeof(FrameDataPayload) + body.size());
 
         FrameDataPayload frame_payload = {};
         frame_payload.swapchain_id = p->swapchain_id;
@@ -1353,15 +1374,19 @@ bool ServerDispatcher::HandlePresent(const PacketHeader& header, const uint8_t* 
         frame_payload.height = height;
         frame_payload.format = 28; // DXGI_FORMAT_R8G8B8A8_UNORM
         frame_payload.row_pitch = width * 4;
-        frame_payload.data_size = static_cast<uint32_t>(m_frameReadbackBuffer.size());
+        frame_payload.data_size = static_cast<uint32_t>(body.size());
         frame_payload.frame_number = p->frame_number; // Echo monotonic client frame number
 
-        // Send header + frame payload + pixel buffer
+        // Send header + frame payload + pixel (or encoded) bytes
         if (!socket->SendExact(&resp_header, sizeof(resp_header))) return false;
         if (!socket->SendExact(&frame_payload, sizeof(frame_payload))) return false;
-        if (!m_frameReadbackBuffer.empty()) {
-            if (!socket->SendExact(m_frameReadbackBuffer.data(), m_frameReadbackBuffer.size())) return false;
+        if (!body.empty()) {
+            if (!socket->SendExact(body.data(), body.size())) return false;
         }
+
+        m_rawFrameBytes += m_frameReadbackBuffer.size();
+        m_sentFrameBytes += body.size();
+        if (m_frameCompression) m_previousFrame.swap(m_frameReadbackBuffer);
     }
 
     m_lastPresentedFrame = p->frame_number;

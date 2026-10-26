@@ -119,12 +119,18 @@ public:
     uint64_t GetTotalCommandsProcessed() const { return m_totalCommandsProcessed; }
     uint64_t GetTotalFramesPresented() const { return m_totalFramesPresented; }
     uint64_t GetLastPresentedFrame() const { return m_lastPresentedFrame; }
+    bool IsFrameCompressionEnabled() const { return m_frameCompression; }
+    uint64_t GetRawFrameBytes() const { return m_rawFrameBytes; }    // pixel bytes rendered
+    uint64_t GetSentFrameBytes() const { return m_sentFrameBytes; }  // pixel bytes put on the wire
 
     ServerResourceManager& GetResourceManager() { return m_resources; }
     const ServerResourceManager& GetResourceManager() const { return m_resources; }
 
     // Direct readback buffer accessor for testing
-    const std::vector<uint8_t>& GetLastReadbackBuffer() const { return m_frameReadbackBuffer; }
+    // (with frame compression the last frame is kept as the delta reference)
+    const std::vector<uint8_t>& GetLastReadbackBuffer() const {
+        return m_frameCompression ? m_previousFrame : m_frameReadbackBuffer;
+    }
 
 private:
     // Individual opcode handlers
@@ -179,6 +185,13 @@ private:
     uint64_t m_lastPresentedFrame = 0;
 
     std::vector<uint8_t> m_frameReadbackBuffer;
+
+    // Frame compression (negotiated through CLIENT_FLAG_FRAME_COMPRESSION)
+    bool m_frameCompression = false;
+    std::vector<uint8_t> m_previousFrame;  // last frame the client holds (delta reference)
+    std::vector<uint8_t> m_encodedFrame;
+    uint64_t m_rawFrameBytes = 0;
+    uint64_t m_sentFrameBytes = 0;
 
     uint64_t m_totalCommandsProcessed = 0;
     uint64_t m_totalFramesPresented = 0;

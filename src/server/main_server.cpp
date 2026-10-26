@@ -12,6 +12,7 @@
 #endif
 
 #include <windows.h>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -185,6 +186,13 @@ int main(int argc, char* argv[]) {
                   << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
         std::cout << "[Server] Total commands executed: " << dispatcher.GetTotalCommandsProcessed()
                   << ", Total frames presented: " << dispatcher.GetTotalFramesPresented() << std::endl;
+        if (dispatcher.GetRawFrameBytes() > 0) {
+            const double raw_mb = dispatcher.GetRawFrameBytes() / (1024.0 * 1024.0);
+            const double sent_mb = dispatcher.GetSentFrameBytes() / (1024.0 * 1024.0);
+            std::cout << "[Server] Frame stream: " << std::fixed << std::setprecision(2) << raw_mb << " MB rendered, "
+                      << sent_mb << " MB sent (" << std::setprecision(1) << (100.0 * sent_mb / raw_mb) << "%, compression "
+                      << (dispatcher.IsFrameCompressionEnabled() ? "on" : "off") << ")" << std::defaultfloat << std::endl;
+        }
 
         // Clean disconnect handling: Close client socket & reset session state
         client_sock->Close();

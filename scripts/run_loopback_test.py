@@ -27,11 +27,11 @@ import verify_pixels  # noqa: E402
 
 BUILD_COMMANDS = [
     ["-std=c++17", "-O2", "-Isrc/common", "-Isrc/server",
-     "src/common/transport.cpp", "src/server/gpu_device.cpp", "src/server/server_dispatcher.cpp",
+     "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/server/gpu_device.cpp", "src/server/server_dispatcher.cpp",
      "src/server/main_server.cpp", "-o", "{build}/server.exe",
      "-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler"],
     ["-shared", "-static", "-std=c++17", "-O2", "-Isrc/common", "-Isrc/client",
-     "src/common/transport.cpp", "src/client/presentation.cpp", "src/client/proxy_device.cpp",
+     "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/client/presentation.cpp", "src/client/proxy_device.cpp",
      "src/client/proxy_context.cpp", "src/client/proxy_swapchain.cpp", "src/client/d3d11_wrapper.cpp",
      "src/client/d3d11.def", "-o", "{build}/client/d3d11.dll",
      "-lws2_32", "-lgdi32", "-luuid", "-ldxguid"],

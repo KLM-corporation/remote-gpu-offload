@@ -69,6 +69,7 @@ Every feature identified during Phase 0 Survey is inventoried and assigned to an
 | 16 | Loopback Test Runner | Automated Python/PowerShell test harness running server and client on 127.0.0.1, executing >= 60 frames, clean exit code 0 | M4 | Survey (R5) |
 | 17 | Programmatic Pixel Verifier | Mathematical validation analyzing captured frame: mean luminance, standard deviation, non-clear ratio, multi-color clusters | M4 | Survey (R5) |
 | 18 | E2E System Integration | Full integration of client proxy DLL with 3D sample app and remote server, verified over loopback with zero memory leaks | M5 | Acceptance Criteria |
+| 19 | Frame Compression | Lossless `FRAME_CODEC_RLE_DELTA` (XOR prediction vs previous frame or left pixel, zero-run/literal tokens) negotiated with `CLIENT_FLAG_FRAME_COMPRESSION`; raw fallback when it would not save bytes | Post-M5 | Bandwidth |
 
 ---
 
@@ -148,6 +149,12 @@ enum RgpuOpcode : uint16_t {
 #pragma pack(pop)
 ```
 
+### 1b. Frame Compression (`src/common/frame_codec.h`)
+- The client sets `CLIENT_FLAG_FRAME_COMPRESSION` in `HandshakeRequestPayload::client_flags` (disable with `RGPU_COMPRESSION=0`). Clients that send 0 keep receiving raw frames.
+- A compressed `OP_FRAME_DATA` carries `FLAG_COMPRESSED`; its body is `CompressedFrameHeader {codec, mode, raw_size}` followed by tokens, and `FrameDataPayload::data_size` counts both.
+- `FRAME_MODE_KEY` (first frame of a session or after a size change) predicts each pixel from its left neighbour; `FRAME_MODE_DELTA` from the previous frame. Both sides keep the last frame the client holds, whether it was sent compressed or raw.
+- Measured on the sample cube (60 frames, 640x480): 70.3 MB rendered, 1.7 MB sent (2.4%). 1280x720 over 200 frames: 703 MB -> 11.3 MB (1.6%). Codec cost at 1080p: about 2 ms encode, 1 ms decode.
+
 ### 2. Transport Contract (`src/common/transport.h`)
 ```cpp
 class NetworkSocket {
@@ -189,6 +196,7 @@ remote_gpu_offload/
 │   ├── common/
 │   │   ├── protocol.h            # Packet header, opcodes, structs
 │   │   ├── transport.h           # Winsock TCP socket wrapper
+│   │   ├── frame_codec.h/.cpp    # Lossless RLE/delta frame compression
 │   │   └── transport.cpp         # Socket implementation & error handling
 │   ├── server/
 │   │   ├── gpu_device.h          # Adapter enumeration, D3D11 headless device
@@ -228,11 +236,11 @@ remote_gpu_offload/
 - **Compiler**: `clang++` (LLVM-MinGW x86_64) or CMake with Ninja
 - **Build Server**:
   ```powershell
-  clang++ -std=c++17 -O2 -Isrc/common -Isrc/server src/common/transport.cpp src/server/gpu_device.cpp src/server/server_dispatcher.cpp src/server/main_server.cpp -o build/server.exe -ld3d11 -ldxgi -lws2_32 -ld3dcompiler
+  clang++ -std=c++17 -O2 -Isrc/common -Isrc/server src/common/transport.cpp src/common/frame_codec.cpp src/server/gpu_device.cpp src/server/server_dispatcher.cpp src/server/main_server.cpp -o build/server.exe -ld3d11 -ldxgi -lws2_32 -ld3dcompiler
   ```
 - **Build Client Proxy DLLs**:
   ```powershell
-  clang++ -shared -static -std=c++17 -O2 -Isrc/common -Isrc/client src/common/transport.cpp src/client/presentation.cpp src/client/proxy_device.cpp src/client/proxy_context.cpp src/client/proxy_swapchain.cpp src/client/d3d11_wrapper.cpp src/client/d3d11.def -o build/client/d3d11.dll -lws2_32 -lgdi32 -luuid -ldxguid
+  clang++ -shared -static -std=c++17 -O2 -Isrc/common -Isrc/client src/common/transport.cpp src/common/frame_codec.cpp src/client/presentation.cpp src/client/proxy_device.cpp src/client/proxy_context.cpp src/client/proxy_swapchain.cpp src/client/d3d11_wrapper.cpp src/client/d3d11.def -o build/client/d3d11.dll -lws2_32 -lgdi32 -luuid -ldxguid
   ```
   The proxy DLL must live in `build/client/`, never next to `server.exe`: Windows loads a `d3d11.dll` from the executable's folder first, so the server would load the proxy instead of the real driver.
   `src/client/generated/*.inc` is produced by `python tools/gen_context_stubs.py <llvm-mingw>/include/d3d11.h src/client/generated`.

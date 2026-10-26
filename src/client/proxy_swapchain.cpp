@@ -1,5 +1,6 @@
 #include "proxy_swapchain.h"
 #include "proxy_context.h"
+#include "frame_codec.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -148,10 +149,25 @@ HRESULT STDMETHODCALLTYPE ProxyDXGISwapChain::Present(UINT SyncInterval, UINT Fl
     if (payload.size() < sizeof(FrameDataPayload)) return DXGI_ERROR_DEVICE_RESET;
     FrameDataPayload frame;
     std::memcpy(&frame, payload.data(), sizeof(frame));
-    const size_t expected = static_cast<size_t>(frame.width) * frame.height * 4;
-    if (frame.data_size < expected || payload.size() < sizeof(frame) + expected) return DXGI_ERROR_DEVICE_RESET;
+    const size_t pixel_count = static_cast<size_t>(frame.width) * frame.height;
+    const size_t expected = pixel_count * 4;
+    const uint8_t* body = payload.data() + sizeof(frame);
+    const size_t body_size = payload.size() - sizeof(frame);
 
-    m_lastFrame.assign(payload.begin() + sizeof(frame), payload.begin() + sizeof(frame) + expected);
+    if (hdr.flags & FLAG_COMPRESSED) {
+        // m_lastFrame is the previous decoded frame: the delta reference, decoded over in place.
+        const bool has_reference = (m_lastFrame.size() == expected);
+        if (!has_reference) m_lastFrame.assign(expected, 0);
+        if (frame.data_size != body_size ||
+            !FrameCodec::Decode(body, body_size, m_lastFrame.data(), pixel_count, has_reference)) {
+            std::cerr << "[RemoteGPU] Corrupt compressed frame " << frame.frame_number << std::endl;
+            m_lastFrame.clear(); // force the next frame to fail unless it is a key frame
+            return DXGI_ERROR_DEVICE_RESET;
+        }
+    } else {
+        if (frame.data_size < expected || body_size < expected) return DXGI_ERROR_DEVICE_RESET;
+        m_lastFrame.assign(body, body + expected);
+    }
     m_presenter.Present(m_desc.OutputWindow, m_lastFrame.data(), frame.width, frame.height, frame.format);
     return S_OK;
 }

@@ -4,6 +4,7 @@ Usage: python scripts/run_final_gate.py [--port 48920] [--skip-build]
 
 Stages (all must pass for exit code 0):
   build            server, proxy d3d11.dll, sample app and test executables
+  test_frame_codec frame compression codec unit tests
   test_transport   transport unit tests
   test_server      headless GPU / dispatcher unit tests
   test_server_fuzz dispatcher fuzzing
@@ -27,9 +28,10 @@ from run_loopback_test import ROOT, start_server, stop  # noqa: E402
 BUILD = ROOT / "build"
 GATE = BUILD / "gate"
 
-SERVER_SRC = ["src/common/transport.cpp", "src/server/gpu_device.cpp", "src/server/server_dispatcher.cpp"]
+SERVER_SRC = ["src/common/transport.cpp", "src/common/frame_codec.cpp", "src/server/gpu_device.cpp", "src/server/server_dispatcher.cpp"]
 SERVER_LIBS = ["-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler"]
 TEST_BUILDS = {
+    "test_frame_codec": ["-Isrc/common", "src/common/frame_codec.cpp", "tests/test_frame_codec.cpp"],
     "test_transport": ["-Isrc/common", "src/common/transport.cpp", "tests/test_transport.cpp", "-lws2_32"],
     "test_server": ["-Isrc/common", "-Isrc/server", *SERVER_SRC, "tests/test_server.cpp", *SERVER_LIBS],
     "test_server_fuzz": ["-Isrc/common", "-Isrc/server", *SERVER_SRC, "tests/test_server_fuzz.cpp", *SERVER_LIBS],
@@ -57,7 +59,7 @@ def stage_build():
         cmd = [compiler, "-std=c++17", "-O2", *args, "-o", str(GATE / f"{name}.exe")]
         if subprocess.run(cmd, cwd=ROOT, capture_output=True).returncode != 0:
             return False, f"{name} failed to compile"
-    return True, "server, proxy DLL, sample and 4 test executables"
+    return True, "server, proxy DLL, sample and 5 test executables"
 
 
 def stage_client_proxy(port):
@@ -83,6 +85,7 @@ def main(argv=None):
     if not args.skip_build:
         stages.append(("build", stage_build))
     stages += [
+        ("test_frame_codec", lambda: run_exe("test_frame_codec")),
         ("test_transport", lambda: run_exe("test_transport")),
         ("test_server", lambda: run_exe("test_server")),
         ("test_server_fuzz", lambda: run_exe("test_server_fuzz")),

@@ -3,6 +3,7 @@
 #include "proxy_swapchain.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -524,6 +525,10 @@ HRESULT ProxyD3D11Device::CreateProxyDeviceAndSwapChain(const char* host, uint16
     req.client_width = width;
     req.client_height = height;
     req.preferred_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    // Frame compression is on unless RGPU_COMPRESSION=0 (useful to compare bandwidth).
+    const char* compression = std::getenv("RGPU_COMPRESSION");
+    req.client_flags = (compression && std::strcmp(compression, "0") == 0) ? CLIENT_FLAG_NONE
+                                                                          : CLIENT_FLAG_FRAME_COMPRESSION;
 
     PacketHeader hdr = {};
     hdr.magic = RGPU_MAGIC;
