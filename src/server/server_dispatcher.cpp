@@ -2527,6 +2527,10 @@ bool ServerDispatcher::HandlePresent(const PacketHeader& header, const uint8_t* 
 
     m_lastPresentedFrame = p->frame_number;
     m_totalFramesPresented++;
+    if (m_totalFramesPresented % 60 == 0 || m_totalFramesPresented == 1) {
+        std::cout << "[Server] Active rendering: " << m_totalFramesPresented << " frames presented ("
+                  << width << "x" << height << ")" << std::endl;
+    }
     return true;
 }
 

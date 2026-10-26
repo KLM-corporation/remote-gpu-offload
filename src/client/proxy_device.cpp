@@ -470,8 +470,8 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateInputLayout(const D3D11_INPUT_
                                                               const void* pShaderBytecodeWithInputSignature,
                                                               SIZE_T BytecodeLength,
                                                               ID3D11InputLayout** ppInputLayout) {
-    if (!pInputElementDescs || NumElements == 0 || !pShaderBytecodeWithInputSignature || BytecodeLength == 0)
-        return E_INVALIDARG;
+    if (NumElements > 0 && !pInputElementDescs) return E_INVALIDARG;
+    if (!pShaderBytecodeWithInputSignature || BytecodeLength == 0) return E_INVALIDARG;
     if (!ppInputLayout) return S_FALSE;
 
     const uint32_t id = AllocateResourceId();
