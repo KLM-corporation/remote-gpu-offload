@@ -191,6 +191,9 @@ private:
     bool HandleCopyResource(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleCopySubresourceRegion(const PacketHeader& header, const uint8_t* payload, size_t size);
     bool HandleOMSetRtvsAndUavs(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleCreateStageShader(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleStageSetShader(const PacketHeader& header, const uint8_t* payload, size_t size);
+    bool HandleStageBind(const PacketHeader& header, const uint8_t* payload, size_t size);
 
     // Fixed-function state handlers
     bool HandleCreateBlendState(const PacketHeader& header, const uint8_t* payload, size_t size);

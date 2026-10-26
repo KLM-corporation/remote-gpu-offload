@@ -165,6 +165,10 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleCreateComputeShader(header, payload, payload_size);
         case OP_CREATE_UAV:
             return HandleCreateUav(header, payload, payload_size);
+        case OP_CREATE_GEOMETRY_SHADER:
+        case OP_CREATE_HULL_SHADER:
+        case OP_CREATE_DOMAIN_SHADER:
+            return HandleCreateStageShader(header, payload, payload_size);
         case OP_DESTROY_RESOURCE:
             return HandleDestroyResource(header, payload, payload_size);
 
@@ -219,6 +223,12 @@ bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t
             return HandleCSSetSampler(header, payload, payload_size);
         case OP_OM_SET_RTVS_AND_UAVS:
             return HandleOMSetRtvsAndUavs(header, payload, payload_size);
+        case OP_STAGE_SET_SHADER:
+            return HandleStageSetShader(header, payload, payload_size);
+        case OP_STAGE_SET_CB:
+        case OP_STAGE_SET_SRV:
+        case OP_STAGE_SET_SAMPLER:
+            return HandleStageBind(header, payload, payload_size);
 
         // 4. Updates & Draw Calls
         case OP_UPDATE_SUBRESOURCE:
@@ -1695,6 +1705,96 @@ bool ServerDispatcher::HandleDispatch(const PacketHeader& /*header*/, const uint
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
     context->Dispatch(p->thread_group_x, p->thread_group_y, p->thread_group_z);
+    return true;
+}
+
+// =============================================================================
+// Geometry & Tessellation Stages (GS, HS, DS)
+// =============================================================================
+
+bool ServerDispatcher::HandleCreateStageShader(const PacketHeader& header, const uint8_t* payload, size_t size) {
+    if (size < sizeof(CreateShaderPayload)) return false;
+    const auto* p = reinterpret_cast<const CreateShaderPayload*>(payload);
+    if (p->res_id == 0 || p->bytecode_length == 0 || p->bytecode_length > 64 * 1024 * 1024 ||
+        p->bytecode_length > size - sizeof(CreateShaderPayload)) {
+        std::cerr << "[ServerDispatcher] CreateStageShader: invalid res_id or bytecode length" << std::endl;
+        return false;
+    }
+    ID3D11Device* device = m_gpuDevice.GetDevice();
+    if (!device) return false;
+    const void* bytecode = payload + sizeof(CreateShaderPayload);
+
+    HRESULT hr = E_INVALIDARG;
+    Microsoft::WRL::ComPtr<ID3D11DeviceChild> shader;
+    if (header.opcode == OP_CREATE_GEOMETRY_SHADER) {
+        Microsoft::WRL::ComPtr<ID3D11GeometryShader> gs;
+        hr = device->CreateGeometryShader(bytecode, p->bytecode_length, nullptr, &gs);
+        shader = gs;
+    } else if (header.opcode == OP_CREATE_HULL_SHADER) {
+        Microsoft::WRL::ComPtr<ID3D11HullShader> hs;
+        hr = device->CreateHullShader(bytecode, p->bytecode_length, nullptr, &hs);
+        shader = hs;
+    } else {
+        Microsoft::WRL::ComPtr<ID3D11DomainShader> ds;
+        hr = device->CreateDomainShader(bytecode, p->bytecode_length, nullptr, &ds);
+        shader = ds;
+    }
+    if (FAILED(hr)) {
+        std::cerr << "[ServerDispatcher] Create GS/HS/DS failed: 0x" << std::hex << hr << std::dec
+                  << " (opcode 0x" << std::hex << header.opcode << std::dec << ", res_id=" << p->res_id << ")" << std::endl;
+        return false;
+    }
+    m_resources.Register(p->res_id, shader);
+    return true;
+}
+
+bool ServerDispatcher::HandleStageSetShader(const PacketHeader& /*header*/, const uint8_t* payload, size_t size) {
+    if (size < sizeof(StageSetShaderPayload)) return false;
+    const auto* p = reinterpret_cast<const StageSetShaderPayload*>(payload);
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+    switch (p->stage) {
+        case STAGE_GEOMETRY: context->GSSetShader(m_resources.Get<ID3D11GeometryShader>(p->res_id).Get(), nullptr, 0); return true;
+        case STAGE_HULL:     context->HSSetShader(m_resources.Get<ID3D11HullShader>(p->res_id).Get(), nullptr, 0); return true;
+        case STAGE_DOMAIN:   context->DSSetShader(m_resources.Get<ID3D11DomainShader>(p->res_id).Get(), nullptr, 0); return true;
+        default:
+            std::cerr << "[ServerDispatcher] StageSetShader: invalid stage " << p->stage << std::endl;
+            return false;
+    }
+}
+
+bool ServerDispatcher::HandleStageBind(const PacketHeader& header, const uint8_t* payload, size_t size) {
+    if (size < sizeof(StageBindPayload)) return false;
+    const auto* p = reinterpret_cast<const StageBindPayload*>(payload);
+    if (p->stage < STAGE_GEOMETRY || p->stage > STAGE_DOMAIN) {
+        std::cerr << "[ServerDispatcher] StageBind: invalid stage " << p->stage << std::endl;
+        return false;
+    }
+    ID3D11DeviceContext* context = m_gpuDevice.GetContext();
+    if (!context) return false;
+
+    if (header.opcode == OP_STAGE_SET_CB) {
+        if (p->slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT) return false;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> cb = m_resources.GetBuffer(p->res_id);
+        ID3D11Buffer* raw = cb.Get();
+        if (p->stage == STAGE_GEOMETRY) context->GSSetConstantBuffers(p->slot, 1, &raw);
+        else if (p->stage == STAGE_HULL) context->HSSetConstantBuffers(p->slot, 1, &raw);
+        else context->DSSetConstantBuffers(p->slot, 1, &raw);
+    } else if (header.opcode == OP_STAGE_SET_SRV) {
+        if (p->slot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) return false;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv = m_resources.GetSRV(p->res_id);
+        ID3D11ShaderResourceView* raw = srv.Get();
+        if (p->stage == STAGE_GEOMETRY) context->GSSetShaderResources(p->slot, 1, &raw);
+        else if (p->stage == STAGE_HULL) context->HSSetShaderResources(p->slot, 1, &raw);
+        else context->DSSetShaderResources(p->slot, 1, &raw);
+    } else {
+        if (p->slot >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) return false;
+        Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler = m_resources.GetSamplerState(p->res_id);
+        ID3D11SamplerState* raw = sampler.Get();
+        if (p->stage == STAGE_GEOMETRY) context->GSSetSamplers(p->slot, 1, &raw);
+        else if (p->stage == STAGE_HULL) context->HSSetSamplers(p->slot, 1, &raw);
+        else context->DSSetSamplers(p->slot, 1, &raw);
+    }
     return true;
 }
 

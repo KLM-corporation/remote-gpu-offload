@@ -664,10 +664,39 @@ HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateUnorderedAccessView(ID3D11Reso
     *ppUAView = new ProxyUnorderedAccessView(p.res_id, pResource, pDesc, this);
     return S_OK;
 }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateGeometryShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11GeometryShader**) { return E_NOTIMPL; }
+namespace {
+
+// GS / HS / DS creation share one wire format: CreateShaderPayload + bytecode.
+template <typename Iface>
+HRESULT CreateStageShader(ProxyD3D11Device* dev, uint16_t opcode, const void* bytecode, SIZE_T length, Iface** pp) {
+    if (!bytecode || length == 0) return E_INVALIDARG;
+    if (!pp) return S_FALSE;
+    const uint32_t id = dev->AllocateResourceId();
+    CreateShaderPayload p = {id, static_cast<uint32_t>(length)};
+    if (!SendWithBlob(dev, opcode, &p, sizeof(p), bytecode, length)) return DXGI_ERROR_DEVICE_REMOVED;
+    *pp = new ProxyStageShader<Iface>(id, dev);
+    return S_OK;
+}
+
+} // namespace
+
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateGeometryShader(const void* pShaderBytecode, SIZE_T BytecodeLength,
+                                                                 ID3D11ClassLinkage*, ID3D11GeometryShader** ppGeometryShader) {
+    return CreateStageShader(this, OP_CREATE_GEOMETRY_SHADER, pShaderBytecode, BytecodeLength, ppGeometryShader);
+}
+
+// Stream output (SOSetTargets) is not forwarded.
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateGeometryShaderWithStreamOutput(const void*, SIZE_T, const D3D11_SO_DECLARATION_ENTRY*, UINT, const UINT*, UINT, UINT, ID3D11ClassLinkage*, ID3D11GeometryShader**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateHullShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11HullShader**) { return E_NOTIMPL; }
-HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateDomainShader(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11DomainShader**) { return E_NOTIMPL; }
+
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateHullShader(const void* pShaderBytecode, SIZE_T BytecodeLength,
+                                                             ID3D11ClassLinkage*, ID3D11HullShader** ppHullShader) {
+    return CreateStageShader(this, OP_CREATE_HULL_SHADER, pShaderBytecode, BytecodeLength, ppHullShader);
+}
+
+HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateDomainShader(const void* pShaderBytecode, SIZE_T BytecodeLength,
+                                                               ID3D11ClassLinkage*, ID3D11DomainShader** ppDomainShader) {
+    return CreateStageShader(this, OP_CREATE_DOMAIN_SHADER, pShaderBytecode, BytecodeLength, ppDomainShader);
+}
 HRESULT STDMETHODCALLTYPE ProxyD3D11Device::CreateComputeShader(const void* pShaderBytecode, SIZE_T BytecodeLength,
                                                                 ID3D11ClassLinkage*, ID3D11ComputeShader** ppComputeShader) {
     if (!pShaderBytecode || BytecodeLength == 0) return E_INVALIDARG;

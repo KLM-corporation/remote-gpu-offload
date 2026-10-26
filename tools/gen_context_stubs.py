@@ -18,6 +18,9 @@ IMPLEMENTED = {
     "CSSetShader", "CSSetShaderResources", "CSSetUnorderedAccessViews", "CSSetConstantBuffers", "CSSetSamplers",
     "Dispatch", "ClearUnorderedAccessViewUint", "ClearUnorderedAccessViewFloat",
     "CopyResource", "CopySubresourceRegion",
+    "GSSetShader", "GSSetConstantBuffers", "GSSetShaderResources", "GSSetSamplers",
+    "HSSetShader", "HSSetConstantBuffers", "HSSetShaderResources", "HSSetSamplers",
+    "DSSetShader", "DSSetConstantBuffers", "DSSetShaderResources", "DSSetSamplers",
 }
 
 src = open(sys.argv[1], encoding="utf-8", errors="replace").read()

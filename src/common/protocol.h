@@ -38,6 +38,13 @@ enum RgpuClientFlags : uint32_t {
     CLIENT_FLAG_FRAME_COMPRESSION = 0x0001  // Client can decode OP_FRAME_DATA sent with FLAG_COMPRESSED
 };
 
+// Shader stages bound through the generic OP_STAGE_SET_* opcodes (VS, PS and CS keep their own).
+enum RgpuShaderStage : uint32_t {
+    STAGE_GEOMETRY = 1,
+    STAGE_HULL     = 2,
+    STAGE_DOMAIN   = 3
+};
+
 // Frame codecs used when OP_FRAME_DATA carries FLAG_COMPRESSED.
 enum RgpuFrameCodec : uint32_t {
     FRAME_CODEC_RLE_DELTA = 1  // XOR prediction + zero-run/literal tokens (see frame_codec.h)
@@ -74,6 +81,9 @@ enum RgpuOpcode : uint16_t {
     OP_CREATE_RASTERIZER_STATE    = 0x001C, // Client -> Server: Create Rasterizer State (culling, fill, scissor)
     OP_CREATE_COMPUTE_SHADER      = 0x001D, // Client -> Server: Create Compute Shader from bytecode
     OP_CREATE_UAV                 = 0x001E, // Client -> Server: Create Unordered Access View
+    OP_CREATE_GEOMETRY_SHADER     = 0x001F, // Client -> Server: Create Geometry Shader from bytecode
+    OP_CREATE_HULL_SHADER         = 0x0020, // Client -> Server: Create Hull Shader from bytecode
+    OP_CREATE_DOMAIN_SHADER       = 0x0021, // Client -> Server: Create Domain Shader from bytecode
 
     // 3. Pipeline State & Binding (0x0030 - 0x004F)
     OP_IA_SET_INPUT_LAYOUT  = 0x0030, // Client -> Server: Bind Input Layout to IA stage
@@ -101,6 +111,10 @@ enum RgpuOpcode : uint16_t {
     OP_CS_SET_CB            = 0x0046, // Client -> Server: Bind Constant Buffer to CS slot
     OP_CS_SET_SAMPLER       = 0x0047, // Client -> Server: Bind Sampler State to CS slot
     OP_OM_SET_RTVS_AND_UAVS = 0x0048, // Client -> Server: OMSetRenderTargetsAndUnorderedAccessViews
+    OP_STAGE_SET_SHADER     = 0x0049, // Client -> Server: Bind GS/HS/DS shader (RgpuShaderStage)
+    OP_STAGE_SET_CB         = 0x004A, // Client -> Server: Bind Constant Buffer to a GS/HS/DS slot
+    OP_STAGE_SET_SRV        = 0x004B, // Client -> Server: Bind Shader Resource View to a GS/HS/DS slot
+    OP_STAGE_SET_SAMPLER    = 0x004C, // Client -> Server: Bind Sampler State to a GS/HS/DS slot
 
     // 4. Updates & Draw Calls (0x0050 - 0x006F)
     OP_UPDATE_SUBRESOURCE   = 0x0050, // Client -> Server: Update subresource memory
@@ -364,6 +378,17 @@ struct OMSetRenderTargetsMrtPayload {
     uint32_t num_rtvs;            // 0..8; slots past num_rtvs are unbound
     uint32_t rtv_ids[8];          // Render Target View IDs (0: empty slot)
     uint32_t dsv_id;              // Depth Stencil View ID (0: none)
+};
+
+struct StageSetShaderPayload {
+    uint32_t stage;               // RgpuShaderStage
+    uint32_t res_id;              // Shader ID (0 to unbind)
+};
+
+struct StageBindPayload {
+    uint32_t stage;               // RgpuShaderStage
+    uint32_t slot;
+    uint32_t res_id;              // Constant buffer, SRV or sampler ID (0 to unbind)
 };
 
 struct CSSetUavPayload {
@@ -665,6 +690,8 @@ static_assert(sizeof(DrawIndexedInstancedPayload) == 20);
 static_assert(sizeof(OMSetRenderTargetsMrtPayload) == 40);
 static_assert(sizeof(CreateUavPayload) == 28);
 static_assert(sizeof(CSSetUavPayload) == 12);
+static_assert(sizeof(StageSetShaderPayload) == 8);
+static_assert(sizeof(StageBindPayload) == 12);
 static_assert(sizeof(DispatchPayload) == 12);
 static_assert(sizeof(ClearUavPayload) == 20);
 static_assert(sizeof(OMSetRtvsAndUavsPayload) == 112);

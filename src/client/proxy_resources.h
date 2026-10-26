@@ -571,6 +571,39 @@ public:
 };
 
 // =============================================================================
+// ProxyStageShader<I>: ID3D11GeometryShader / ID3D11HullShader / ID3D11DomainShader
+// =============================================================================
+template <typename Iface>
+class ProxyStageShader : public Iface, public ProxyResourceBase {
+public:
+    ProxyStageShader(uint32_t res_id, ProxyD3D11Device* device)
+        : ProxyResourceBase(res_id, device) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11DeviceChild) || riid == __uuidof(Iface)) {
+            *ppvObject = static_cast<Iface*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IProxyResource) {
+            *ppvObject = static_cast<IProxyResource*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return AddRefBase(); }
+    ULONG STDMETHODCALLTYPE Release() override { return ReleaseBase(); }
+
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device **ppDevice) override;
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
+};
+
+// =============================================================================
 // ProxyUnorderedAccessView: ID3D11UnorderedAccessView
 // =============================================================================
 class ProxyUnorderedAccessView : public ID3D11UnorderedAccessView, public ProxyResourceBase {

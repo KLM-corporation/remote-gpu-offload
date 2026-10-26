@@ -35,6 +35,9 @@ public:
 
 private:
     bool Send(uint16_t opcode, const void* payload, uint32_t length);
+    void SetStageShader(uint32_t stage, IUnknown* shader);
+    template <typename T>
+    void BindStage(uint16_t opcode, uint32_t stage, UINT start, UINT count, T* const* items);
 
     ProxyD3D11Device* m_device;
     volatile ULONG    m_refCount{1};

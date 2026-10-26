@@ -127,6 +127,62 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::VSSetSamplers(UINT StartSlot, UI
 }
 
 // =============================================================================
+// Geometry & tessellation stages (generic OP_STAGE_SET_* opcodes)
+// =============================================================================
+
+void ProxyD3D11DeviceContext::SetStageShader(uint32_t stage, IUnknown* shader) {
+    StageSetShaderPayload p = {stage, GetResourceIdFromCOM(shader)};
+    Send(OP_STAGE_SET_SHADER, &p, sizeof(p));
+}
+
+template <typename T>
+void ProxyD3D11DeviceContext::BindStage(uint16_t opcode, uint32_t stage, UINT start, UINT count, T* const* items) {
+    for (UINT i = 0; i < count; ++i) {
+        StageBindPayload p = {stage, start + i, items ? GetResourceIdFromCOM(items[i]) : 0};
+        Send(opcode, &p, sizeof(p));
+    }
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GSSetShader(ID3D11GeometryShader* pShader, ID3D11ClassInstance* const*, UINT) {
+    SetStageShader(STAGE_GEOMETRY, pShader);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers) {
+    BindStage(OP_STAGE_SET_CB, STAGE_GEOMETRY, StartSlot, NumBuffers, ppConstantBuffers);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
+    BindStage(OP_STAGE_SET_SRV, STAGE_GEOMETRY, StartSlot, NumViews, ppShaderResourceViews);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::GSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
+    BindStage(OP_STAGE_SET_SAMPLER, STAGE_GEOMETRY, StartSlot, NumSamplers, ppSamplers);
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::HSSetShader(ID3D11HullShader* pShader, ID3D11ClassInstance* const*, UINT) {
+    SetStageShader(STAGE_HULL, pShader);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::HSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers) {
+    BindStage(OP_STAGE_SET_CB, STAGE_HULL, StartSlot, NumBuffers, ppConstantBuffers);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::HSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
+    BindStage(OP_STAGE_SET_SRV, STAGE_HULL, StartSlot, NumViews, ppShaderResourceViews);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::HSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
+    BindStage(OP_STAGE_SET_SAMPLER, STAGE_HULL, StartSlot, NumSamplers, ppSamplers);
+}
+
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetShader(ID3D11DomainShader* pShader, ID3D11ClassInstance* const*, UINT) {
+    SetStageShader(STAGE_DOMAIN, pShader);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers) {
+    BindStage(OP_STAGE_SET_CB, STAGE_DOMAIN, StartSlot, NumBuffers, ppConstantBuffers);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews) {
+    BindStage(OP_STAGE_SET_SRV, STAGE_DOMAIN, StartSlot, NumViews, ppShaderResourceViews);
+}
+void STDMETHODCALLTYPE ProxyD3D11DeviceContext::DSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers) {
+    BindStage(OP_STAGE_SET_SAMPLER, STAGE_DOMAIN, StartSlot, NumSamplers, ppSamplers);
+}
+
+// =============================================================================
 // Compute stage
 // =============================================================================
 

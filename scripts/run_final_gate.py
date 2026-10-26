@@ -15,6 +15,7 @@ Stages (all must pass for exit code 0):
   pipeline_features instancing, MRT, depth-only binding, VS resources, buffer SRVs
   compute          compute shaders, UAVs (texture + structured buffer), UAV clears
   copies           CopyResource, CopySubresourceRegion (texture, mip, buffer), pixel shader UAVs
+  shader_stages    geometry shader + tessellation (hull/domain) with their CBs, SRVs, samplers
   real_app_compat  Microsoft D3D11 tutorials through the proxy (skipped if not fetched)
   loopback_e2e     sample app through the proxy for 60 frames + pixel verification
   fault_tolerance  disconnects, idle session and multi-session leak check
@@ -50,6 +51,7 @@ TEST_BUILDS = {
     "test_pipeline_features": ["tests/test_pipeline_features.cpp", "-ld3dcompiler", "-luser32", "-ldxguid"],
     "test_compute": ["tests/test_compute.cpp", "-ld3dcompiler", "-luser32", "-ldxguid"],
     "test_copies": ["tests/test_copies.cpp", "-ld3dcompiler", "-luser32", "-ldxguid"],
+    "test_shader_stages": ["tests/test_shader_stages.cpp", "-ld3dcompiler", "-luser32", "-ldxguid"],
 }
 
 
@@ -73,7 +75,7 @@ def stage_build():
         cmd = [compiler, "-std=c++17", "-O2", *args, "-o", str(GATE / f"{name}.exe")]
         if subprocess.run(cmd, cwd=ROOT, capture_output=True).returncode != 0:
             return False, f"{name} failed to compile"
-    return True, "server, proxy DLL, sample and 11 test executables"
+    return True, "server, proxy DLL, sample and 12 test executables"
 
 
 def stage_against_server(test, args, port, single_session=True):
@@ -124,6 +126,7 @@ def main(argv=None):
                                                            [str(BUILD / "client" / "d3d11.dll")], args.port + 6)),
         ("compute", lambda: stage_against_server("test_compute", [str(BUILD / "client" / "d3d11.dll")], args.port + 7)),
         ("copies", lambda: stage_against_server("test_copies", [str(BUILD / "client" / "d3d11.dll")], args.port + 8)),
+        ("shader_stages", lambda: stage_against_server("test_shader_stages", [str(BUILD / "client" / "d3d11.dll")], args.port + 9)),
         ("real_app_compat", lambda: stage_compat(args.port + 3)),
         ("loopback_e2e", lambda: (run_loopback_test.main(["--port", str(args.port + 1), "--frames", "60"]) == 0,
                                   "see build/loopback_artifacts")),

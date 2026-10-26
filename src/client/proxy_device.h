@@ -436,6 +436,14 @@ inline void ProxyComputeShader::GetDevice(ID3D11Device **ppDevice) {
     }
 }
 
+template <typename Iface>
+inline void ProxyStageShader<Iface>::GetDevice(ID3D11Device **ppDevice) {
+    if (ppDevice && m_device) {
+        *ppDevice = m_device;
+        m_device->AddRef();
+    }
+}
+
 inline void ProxyUnorderedAccessView::GetDevice(ID3D11Device **ppDevice) {
     if (ppDevice && m_device) {
         *ppDevice = m_device;

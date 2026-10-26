@@ -835,6 +835,39 @@ static void Test_ServerDispatcher_CopyBounds() {
 }
 
 // ----------------------------------------------------------------------------
+// Test Suite 8: GS/HS/DS binding bounds (zero-trust).
+// ----------------------------------------------------------------------------
+static void Test_ServerDispatcher_StageBounds() {
+    HostGpuDevice gpu;
+    TEST_ASSERT(gpu.InitializeDedicatedGpu());
+    ServerDispatcher dispatcher(gpu);
+
+    PacketHeader sh = {RGPU_MAGIC, OP_STAGE_SET_SHADER, FLAG_NONE, 1, 0};
+    StageSetShaderPayload bad_stage = {4, 0};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(sh, reinterpret_cast<const uint8_t*>(&bad_stage), sizeof(bad_stage)), "unknown stage rejected");
+    StageSetShaderPayload vs_stage = {0, 0};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(sh, reinterpret_cast<const uint8_t*>(&vs_stage), sizeof(vs_stage)), "stage 0 rejected (VS has its own opcode)");
+    StageSetShaderPayload unbind = {STAGE_HULL, 0};
+    TEST_ASSERT_MSG(dispatcher.DispatchCommand(sh, reinterpret_cast<const uint8_t*>(&unbind), sizeof(unbind)), "unbinding the hull shader accepted");
+
+    PacketHeader bh = {RGPU_MAGIC, OP_STAGE_SET_CB, FLAG_NONE, 2, 0};
+    StageBindPayload cb_slot = {STAGE_GEOMETRY, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, 0};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(bh, reinterpret_cast<const uint8_t*>(&cb_slot), sizeof(cb_slot)), "constant buffer slot beyond the limit rejected");
+    bh.opcode = OP_STAGE_SET_SAMPLER;
+    StageBindPayload sampler_slot = {STAGE_DOMAIN, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT, 0};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(bh, reinterpret_cast<const uint8_t*>(&sampler_slot), sizeof(sampler_slot)), "sampler slot beyond the limit rejected");
+    bh.opcode = OP_STAGE_SET_SRV;
+    StageBindPayload bad_bind_stage = {7, 0, 0};
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(bh, reinterpret_cast<const uint8_t*>(&bad_bind_stage), sizeof(bad_bind_stage)), "SRV bind with unknown stage rejected");
+
+    PacketHeader ch = {RGPU_MAGIC, OP_CREATE_HULL_SHADER, FLAG_NONE, 3, 0};
+    std::vector<uint8_t> garbage(sizeof(CreateShaderPayload) + 64, 0xAB);
+    CreateShaderPayload sp = {901, 64};
+    std::memcpy(garbage.data(), &sp, sizeof(sp));
+    TEST_ASSERT_MSG(!dispatcher.DispatchCommand(ch, garbage.data(), garbage.size()), "hull shader from garbage bytecode rejected");
+}
+
+// ----------------------------------------------------------------------------
 // Test Main Entrypoint
 // ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
@@ -859,6 +892,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST_SUITE(Test_ServerDispatcher_TextureDataBounds);
     RUN_TEST_SUITE(Test_ServerDispatcher_ComputeBounds);
     RUN_TEST_SUITE(Test_ServerDispatcher_CopyBounds);
+    RUN_TEST_SUITE(Test_ServerDispatcher_StageBounds);
 
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
