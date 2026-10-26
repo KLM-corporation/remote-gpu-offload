@@ -1,0 +1,9 @@
+﻿# Build outputs and temp files
+build/
+bin/
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+.cache/
