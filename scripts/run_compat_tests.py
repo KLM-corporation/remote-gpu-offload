@@ -39,7 +39,9 @@ TUTORIALS = {
     "04": (["Tutorial04.fxh"], 2),                  # vertex-coloured cube
     "05": (["Tutorial05.fxh"], 2),                  # two animated cubes
     "06": (["Tutorial06.fxh"], 2),                  # lit cube + light markers
-    "07": (["Tutorial07.fxh", "seafloor.dds"], 2),  # textured cube (DDS loader)
+    # Textured cube tinted by one clock-driven colour: at dark moments the whole texture falls in
+    # a single colour cluster (seen on an RTX 4070 run), so only contrast and coverage are required.
+    "07": (["Tutorial07.fxh", "seafloor.dds"], 1),
 }
 
 
