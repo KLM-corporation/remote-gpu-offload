@@ -1,4 +1,4 @@
-# BRIEFING — 2026-10-26T17:20:02Z
+# BRIEFING — 2026-10-26T17:28:30Z
 
 ## Mission
 Empirically stress-test rendering and readback throughput, row-pitch alignment, and frame latency of HostGpuDevice in Milestone 2.
@@ -32,15 +32,21 @@ Empirically stress-test rendering and readback throughput, row-pitch alignment, 
   5. Real-time performance evaluation on host GPU
 
 ## Attack Surface
-- **Hypotheses tested**: None yet
-- **Vulnerabilities found**: None yet
-- **Untested angles**: High-res readback performance, staging buffer allocation overhead, 256-byte alignment / row pitch padding math, continuous frame latency jitter, pixel accuracy under non-standard aspect ratios.
+- **Hypotheses tested**:
+  - H1: Host GPU offscreen rendering + staging readback sustains real-time >= 60 FPS (Confirmed: 684.8 FPS @ 800x600, 173.3-211.9 FPS @ 1080p).
+  - H2: Driver row-pitch padding causes scanline shearing on prime/odd dimensions (Refuted: 1,136,245 pixels tested with coordinate comb oracle with 0 skew errors).
+  - H3: Continuous multi-frame execution causes pipeline stalls or memory leaks (Refuted: 100 continuous frames ran cleanly with 0% 30 FPS drops, dynamic resize completed in 3.9ms/cycle).
+  - H4: Headless rendering distorts NDC geometric projection (Refuted: non-clear ratio matched 12.500% exactly; bounding box within 1 px).
+- **Vulnerabilities found**: No bugs or functional defects. Single-staging synchronous mapping creates minor tail latency spikes (P99 ~ 20-72 ms) at 1080p, but sustained FPS remains > 170 FPS. Double-buffering recommended for future 4K milestones.
+- **Untested angles**: Video codec compression (H.264/HEVC) and multi-GPU topologies (out of scope for M2).
 
 ## Loaded Skills
 - None specified in dispatch
 
 ## Key Decisions Made
-- Initializing briefing and progress tracking
+- Constructed and executed independent empirical benchmark harness in `tests/test_server_benchmark.cpp` (530 assertions, all passed).
+- Confirmed zero scanline skew across 5 odd/prime dimensions using a mathematical pixel shader comb pattern.
+- Issued verdict: `APPROVE`.
 
 ## Artifact Index
 - `DISPATCH.md` — incoming dispatch instructions
@@ -48,3 +54,5 @@ Empirically stress-test rendering and readback throughput, row-pitch alignment, 
 - `progress.md` — heartbeat and task progress
 - `challenge_report.md` — full challenge report with benchmark data
 - `handoff.md` — final 5-component handoff report
+- `tests/test_server_benchmark.cpp` — independent empirical benchmark test harness
+- `build/test_server_benchmark.exe` — compiled benchmark executable

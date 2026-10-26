@@ -65,16 +65,19 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | explorer_m2_2 | teamwork_preview_explorer | Milestone 2: Server Dispatcher Spec | completed | 2dc0665d-b819-4974-8986-e11a5529263e |
 | explorer_m2_3 | teamwork_preview_explorer | Milestone 2: Server Main & Unit Test Spec | completed | 9d660238-dcc3-4b4a-921e-dde079778b39 |
 | worker_m2_1 | teamwork_preview_worker | Milestone 2: Implement gpu_device, server_dispatcher, main_server, test_server | completed | 77646538-b318-4e6a-8b1b-cf838a8768f5 |
-| reviewer_m2_1 | teamwork_preview_reviewer | Milestone 2: Review server correctness & readback | in-progress | 6ee1a773-ae13-49cf-bff9-85f7dfa94817 |
-| reviewer_m2_2 | teamwork_preview_reviewer | Milestone 2: Review R3/R4 requirements & lifecycle | in-progress | 429bdf2c-6dbe-4f72-b1c7-d2254bcd6cbf |
-| challenger_m2_1 | teamwork_preview_challenger | Milestone 2: Adversarial stress test disconnects & corrupt opcodes | in-progress | a346354e-8e13-4efd-880a-70afebcac075 |
-| challenger_m2_2 | teamwork_preview_challenger | Milestone 2: Benchmark multi-frame readback FPS & pitch stress | in-progress | ccb37369-e7ad-4b93-8e73-ce585f8dbfbd |
-| auditor_m2_1 | teamwork_preview_auditor | Milestone 2: Forensic integrity verification of host GPU execution | in-progress | 124d8c21-48a6-4122-ab1e-484fe9caa322 |
+| reviewer_m2_1 | teamwork_preview_reviewer | Milestone 2: Review server correctness & readback | completed | 6ee1a773-ae13-49cf-bff9-85f7dfa94817 |
+| reviewer_m2_2 | teamwork_preview_reviewer | Milestone 2: Review R3/R4 requirements & lifecycle | completed | 429bdf2c-6dbe-4f72-b1c7-d2254bcd6cbf |
+| challenger_m2_1 | teamwork_preview_challenger | Milestone 2: Adversarial stress test disconnects & corrupt opcodes | completed | a346354e-8e13-4efd-880a-70afebcac075 |
+| challenger_m2_2 | teamwork_preview_challenger | Milestone 2: Benchmark multi-frame readback FPS & pitch stress | completed | ccb37369-e7ad-4b93-8e73-ce585f8dbfbd |
+| auditor_m2_1 | teamwork_preview_auditor | Milestone 2: Forensic integrity verification of host GPU execution | completed | 124d8c21-48a6-4122-ab1e-484fe9caa322 |
+| explorer_m2_r2_1 | teamwork_preview_explorer | Milestone 2 R2: Bounds validation specification | in-progress | 5fbc0b5b-ef6e-43dc-bb51-6b5fd486d9c1 |
+| explorer_m2_r2_2 | teamwork_preview_explorer | Milestone 2 R2: Input layout safety specification | in-progress | d8b476a3-9ef0-4a20-b212-4154fbe9bcd5 |
+| explorer_m2_r2_3 | teamwork_preview_explorer | Milestone 2 R2: Stress test criteria analysis | in-progress | af4d3e98-a049-4ee5-a0fa-2a4a7fa2df49 |
 
 ## Succession Status
 - Succession required: no (singleton orchestrator)
-- Spawn count: 21 / 128
-- Pending subagents: 6ee1a773-ae13-49cf-bff9-85f7dfa94817, 429bdf2c-6dbe-4f72-b1c7-d2254bcd6cbf, a346354e-8e13-4efd-880a-70afebcac075, ccb37369-e7ad-4b93-8e73-ce585f8dbfbd, 124d8c21-48a6-4122-ab1e-484fe9caa322
+- Spawn count: 24 / 128
+- Pending subagents: 5fbc0b5b-ef6e-43dc-bb51-6b5fd486d9c1, d8b476a3-9ef0-4a20-b212-4154fbe9bcd5, af4d3e98-a049-4ee5-a0fa-2a4a7fa2df49
 - Predecessor: none
 - Successor: none
 

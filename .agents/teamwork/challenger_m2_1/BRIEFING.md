@@ -27,18 +27,33 @@ Adversarially challenge and stress-test ServerDispatcher and HostGpuDevice for M
 - **Review criteria**: Robustness against client disconnects, malformed opcodes, invalid resource IDs, COM memory leaks, undefined behavior
 
 ## Attack Surface
-- **Hypotheses tested**: [TBD]
-- **Vulnerabilities found**: [TBD]
-- **Untested angles**: [TBD]
+- **Hypotheses tested**:
+  - Socket drops mid-stream (partial packet, TCP RST, drop during OP_PRESENT, 20-client churn): ROBUST.
+  - Non-existent resource IDs (`0xDEADBEEF` across 16 opcodes): ROBUST.
+  - Cross-type resource lookups (COM QueryInterface via ComPtr::As): ROBUST.
+  - GPU resource leaks (1,000 buffers x2, 1,000 textures, 500 rapid cycles): ROBUST (stabilized at 143 MB, 2 MB growth).
+  - Out-of-bounds primitive topologies and pipeline slots: VULNERABLE (19 driver crashes observed).
+- **Vulnerabilities found**:
+  - `OP_IA_SET_TOPOLOGY` lacks enum validation; invalid values trigger `0xC0000005` in driver.
+  - `OP_VS_SET_CB` and `OP_PS_SET_CB` lack slot checks (< 14); out-of-range slots trigger `0xC0000005`.
+  - `OP_PS_SET_SRV` lacks slot checks (< 128); out-of-range slots trigger `0xC0000005`.
+  - `OP_PS_SET_SAMPLER` lacks slot checks (< 16); out-of-range slots trigger `0xC0000005`.
+  - `OP_CREATE_INPUT_LAYOUT` lacks string length bounding on 32-byte semantic names.
+- **Untested angles**:
+  - Full multithreaded socket concurrency (beyond scope of single-client session design).
 
 ## Loaded Skills
 - None provided in dispatch
 
 ## Key Decisions Made
-- Initialized briefing and prepared test strategy.
+- Authored and compiled `tests/test_server_stress.cpp` using Clang with `-fms-extensions` and `-lpsapi`.
+- Verified execution of 181 assertions across 5 adversarial test suites.
+- Confirmed empirical reproduction of driver access violations under untrusted network inputs.
+- Issued verdict: `REQUEST_CHANGES`.
 
 ## Artifact Index
 - `DISPATCH.md` — Log of incoming dispatches
 - `progress.md` — Liveness and execution progress
 - `challenge_report.md` — Detailed adversarial test findings and verdicts
-- `handoff.md` — Self-contained 5-component handoff
+- `handoff.md` — Self-contained 5-component handoff report
+- `tests/test_server_stress.cpp` — Full adversarial test harness executable (`build/test_server_stress.exe`)
