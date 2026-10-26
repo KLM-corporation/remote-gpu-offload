@@ -112,11 +112,16 @@ Verify binary wire-compatibility of `PacketHeader`, guarantee zero compiler-indu
    - `sizeof(PacketHeader::sequence_id) == 4`
    - `sizeof(PacketHeader::payload_length) == 4`
 4. Magic constant `RGPU_MAGIC == 0x52475055`:
-   - Verify ASCII representation in Little-Endian memory:
-     - `byte[0] == 'R' (0x52)`
-     - `byte[1] == 'G' (0x47)`
-     - `byte[2] == 'P' (0x50)`
-     - `byte[3] == 'U' (0x55)`
+   - Verify character shifting:
+     - `((magic_val >> 24) & 0xFF) == 'R' (0x52)`
+     - `((magic_val >> 16) & 0xFF) == 'G' (0x47)`
+     - `((magic_val >> 8) & 0xFF) == 'P' (0x50)`
+     - `(magic_val & 0xFF) == 'U' (0x55)`
+   - Verify memory representation on x86-64 (Little-Endian, LSB first):
+     - `byte[0] == 0x55 ('U')`
+     - `byte[1] == 0x50 ('P')`
+     - `byte[2] == 0x47 ('G')`
+     - `byte[3] == 0x52 ('R')`
 5. Version and Port Constants:
    - `RGPU_PROTOCOL_VERSION == 1`
    - `RGPU_DEFAULT_PORT == 48888`
@@ -399,11 +404,16 @@ void Test_PacketHeader_PackingAndConstants() {
     // 4. Magic constant check (0x52475055 == 'RGPU')
     TEST_ASSERT_MSG(RemoteGPU::RGPU_MAGIC == 0x52475055, "RGPU_MAGIC == 0x52475055");
     uint32_t magic_val = RemoteGPU::RGPU_MAGIC;
+    // On x86-64 little-endian, integer 0x52475055 has LSB 0x55 ('U') at index 0 and MSB 0x52 ('R') at index 3
     const uint8_t* magic_bytes = reinterpret_cast<const uint8_t*>(&magic_val);
-    TEST_ASSERT(magic_bytes[0] == 'R');
-    TEST_ASSERT(magic_bytes[1] == 'G');
-    TEST_ASSERT(magic_bytes[2] == 'P');
-    TEST_ASSERT(magic_bytes[3] == 'U');
+    TEST_ASSERT(magic_bytes[0] == 0x55); // 'U'
+    TEST_ASSERT(magic_bytes[1] == 0x50); // 'P'
+    TEST_ASSERT(magic_bytes[2] == 0x47); // 'G'
+    TEST_ASSERT(magic_bytes[3] == 0x52); // 'R'
+    TEST_ASSERT(((magic_val >> 24) & 0xFF) == 'R');
+    TEST_ASSERT(((magic_val >> 16) & 0xFF) == 'G');
+    TEST_ASSERT(((magic_val >> 8) & 0xFF) == 'P');
+    TEST_ASSERT((magic_val & 0xFF) == 'U');
 
     // 5. Version and default port checks
     TEST_ASSERT(RemoteGPU::RGPU_PROTOCOL_VERSION == 1);

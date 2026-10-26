@@ -1,6 +1,6 @@
 # Progress — Remote GPU Offload
 
-Last visited: 2026-10-26T16:20:15Z
+Last visited: 2026-10-26T16:30:15Z
 
 ## Current Status
 - [x] Initialized workspace and briefing
@@ -8,7 +8,7 @@ Last visited: 2026-10-26T16:20:15Z
 - [x] Phase 0: Survey and Scope Mapping (completed by ba8f944f, 3c836cc8, 0373d885)
 - [x] Phase 1: Architecture, Milestone Decomposition, and Interface Contracts in PROJECT.md and TEST_INFRA.md
 - [/] Phase 2: Dual Track Execution (Implementation Track + E2E Testing Track)
-  - [/] Milestone 1: Core Network Protocol & Transport Serialization (dispatched Explorers: 681a9199, 4c708487, e7f9ea4b)
+  - [/] Milestone 1: Core Network Protocol & Transport Serialization (worker_m1_1 6049dfaf active)
   - [ ] Milestone 2: Remote GPU Execution Server (Direct3D 11/12 adapter enumeration, device/context recreation, command replay, offscreen rendering)
   - [ ] Milestone 3: Client Direct3D Hooking & Proxy Layer (d3d11/dxgi proxy, command interception, state tracker)
   - [ ] Milestone 4: Framebuffer Readback & Client Presentation Pipeline (GPU texture readback, transfer, swapchain present)

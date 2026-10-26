@@ -52,14 +52,15 @@ Orchestrate the design, implementation, and verification of a networked GPU offl
 | spec_miner_survey_1 | teamwork_preview_spec_miner | Phase 0: D3D Interception & Presentation Spec | completed | ba8f944f-4cca-41f4-82e4-1e09327454bb |
 | explorer_survey_1 | teamwork_preview_explorer | Phase 0: Protocol Transport & Framing Spec | completed | 3c836cc8-3ad9-453f-ac52-522f954c75c3 |
 | explorer_survey_2 | teamwork_preview_explorer | Phase 0: Server & Test Harness Spec | completed | 0373d885-cb15-467e-be1f-48a0fde3d934 |
-| explorer_m1_1 | teamwork_preview_explorer | Milestone 1: Protocol Spec & Struct Layout | in-progress | 681a9199-d668-4988-bc8f-d4c0b8b6b47e |
-| explorer_m1_2 | teamwork_preview_explorer | Milestone 1: Winsock Transport Implementation Spec | in-progress | 4c708487-333d-4963-b5a2-be16b9f3e465 |
-| explorer_m1_3 | teamwork_preview_explorer | Milestone 1: Transport Test Suite Design | in-progress | e7f9ea4b-e143-478e-b86e-a7ed463b1177 |
+| explorer_m1_1 | teamwork_preview_explorer | Milestone 1: Protocol Spec & Struct Layout | completed | 681a9199-d668-4988-bc8f-d4c0b8b6b47e |
+| explorer_m1_2 | teamwork_preview_explorer | Milestone 1: Winsock Transport Implementation Spec | completed | 4c708487-333d-4963-b5a2-be16b9f3e465 |
+| explorer_m1_3 | teamwork_preview_explorer | Milestone 1: Transport Test Suite Design | completed | e7f9ea4b-e143-478e-b86e-a7ed463b1177 |
+| worker_m1_1 | teamwork_preview_worker | Milestone 1: Implement protocol.h, transport.cpp, test_transport.cpp | in-progress | 6049dfaf-f9a0-4aa9-a12e-6cbadf2a6aa4 |
 
 ## Succession Status
 - Succession required: no
-- Spawn count: 6 / 16
-- Pending subagents: 681a9199-d668-4988-bc8f-d4c0b8b6b47e, 4c708487-333d-4963-b5a2-be16b9f3e465, e7f9ea4b-e143-478e-b86e-a7ed463b1177
+- Spawn count: 7 / 16
+- Pending subagents: 6049dfaf-f9a0-4aa9-a12e-6cbadf2a6aa4
 - Predecessor: none
 - Successor: not yet spawned
 

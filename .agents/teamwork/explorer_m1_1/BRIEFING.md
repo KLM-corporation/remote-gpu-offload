@@ -1,4 +1,4 @@
-# BRIEFING — 2026-10-26T16:20:00Z
+# BRIEFING — 2026-10-26T16:29:00Z
 
 ## Mission
 Investigate and produce the precise implementation specification for `src/common/protocol.h` covering all 32 D3D11 opcodes, 16-byte PacketHeader, and all command payload structs.
@@ -21,12 +21,14 @@ Investigate and produce the precise implementation specification for `src/common
 - Updated: not yet
 
 ## Investigation State
-- **Explored paths**: None yet
-- **Key findings**: Initial dispatch received
-- **Unexplored areas**: ORIGINAL_REQUEST.md, PROJECT.md, transport_report.md, existing repo files
+- **Explored paths**: ORIGINAL_REQUEST.md, PROJECT.md, transport_report.md, server_test_report.md, spec_report.md.
+- **Key findings**: Complete 33 opcode set, verified 16-byte PacketHeader, 100% standard-layout trivially copyable payload structs with static_assert verification under Clang C++17.
+- **Unexplored areas**: None for Milestone 1 Protocol specification.
 
 ## Key Decisions Made
-- Focus on comprehensive specification of protocol.h satisfying all 32 opcodes and explicit payload layouts.
+- Confirmed `#pragma pack(push, 1)` and `#pragma pack(pop)` for zero padding.
+- Used standard `<cstdint>` integer types, avoiding Windows SDK header dependencies in `protocol.h`.
+- Added `OP_CREATE_SAMPLER` (0x0019) and `OP_PS_SET_SAMPLER` (0x003B) to provide comprehensive support for textured 3D mesh rendering.
 
 ## Artifact Index
 - DISPATCH.md — Task dispatch record
