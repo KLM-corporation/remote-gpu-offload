@@ -31,6 +31,18 @@ static std::atomic<bool> g_server_running{true};
 /**
  * @brief Win32 Console Control Handler for graceful shutdown on Ctrl+C, Ctrl+Break, or Close.
  */
+// Windows consoles pause the process on any mouse click (QuickEdit selection) until a key is
+// pressed: a stray click froze rendering. Turn that behaviour off and keep stdout line-buffered.
+static void DisableConsoleQuickEdit() {
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (in != INVALID_HANDLE_VALUE && GetConsoleMode(in, &mode)) {
+        mode &= ~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE | ENABLE_INSERT_MODE);
+        mode |= ENABLE_EXTENDED_FLAGS;
+        SetConsoleMode(in, mode);
+    }
+}
+
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type) {
     switch (ctrl_type) {
         case CTRL_C_EVENT:
@@ -114,6 +126,7 @@ int main(int argc, char* argv[]) {
     std::cout << "============================================================" << std::endl;
 
     // 2. Register Console Signal Handler
+    DisableConsoleQuickEdit();
     if (!SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE)) {
         std::cerr << "[Server] Warning: Failed to set console control handler." << std::endl;
     }

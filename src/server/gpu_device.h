@@ -19,6 +19,7 @@
 #include <vector>
 #include <cstdint>
 #include <memory>
+#include <set>
 
 namespace RemoteGPU {
 
@@ -57,6 +58,9 @@ public:
     bool CreateOffscreenTargets(uint32_t width, uint32_t height);
     bool ReadbackFrame(std::vector<uint8_t>& out_rgba, uint32_t& out_width, uint32_t& out_height);
     void Reset();
+
+    // Prints new (de-duplicated) Direct3D debug-layer errors; no-op without the debug layer.
+    void DrainDebugMessages();
 
     // Render & State Helpers
     void Clear(const float clear_color[4], float depth = 1.0f, uint8_t stencil = 0);
@@ -104,6 +108,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_depth_texture;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilView> m_dsv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_staging_texture;
+    Microsoft::WRL::ComPtr<ID3D11InfoQueue> m_info_queue;
+    std::set<std::string> m_printed_debug_messages;
 };
 
 } // namespace RemoteGPU

@@ -6,10 +6,46 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <dxgi1_4.h>
 
 namespace RemoteGPU {
 
 namespace {
+
+// Flush the command stream and wait (bounded) until the GPU is idle, so the driver really
+// reclaims the memory of resources destroyed so far before an allocation is retried.
+// ClearState() must NOT be used here: the retry happens in the middle of a frame.
+void DrainGpu(ID3D11Device* device, ID3D11DeviceContext* ctx) {
+    if (!ctx) return;
+    ctx->Flush();
+    if (!device) return;
+    D3D11_QUERY_DESC qd = {};
+    qd.Query = D3D11_QUERY_EVENT;
+    Microsoft::WRL::ComPtr<ID3D11Query> q;
+    if (FAILED(device->CreateQuery(&qd, &q))) return;
+    ctx->End(q.Get());
+    ctx->Flush();
+    const ULONGLONG start = GetTickCount64();
+    while (ctx->GetData(q.Get(), nullptr, 0, 0) == S_FALSE) {
+        if (GetTickCount64() - start > 500) break;
+        Sleep(0);
+    }
+}
+
+// "VRAM used/budget MB" of the adapter behind `device` (diagnostics for E_OUTOFMEMORY).
+std::string VideoMemorySummary(ID3D11Device* device) {
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    if (!device || FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(dxgiDevice.GetAddressOf()))) ||
+        FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter.As(&adapter3))) {
+        return "VRAM n/a";
+    }
+    DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
+    if (FAILED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) return "VRAM n/a";
+    return "VRAM " + std::to_string(info.CurrentUsage >> 20) + "/" + std::to_string(info.Budget >> 20) + " MB";
+}
 
 inline bool IsValidDxgiFormat(uint32_t format) {
     return (format >= 1 && format <= 191);
@@ -439,11 +475,7 @@ bool ServerDispatcher::HandleCreateBuffer(const PacketHeader& /*header*/, const 
     }
 
     if (FAILED(hr) && hr == E_OUTOFMEMORY) {
-        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
-        if (ctx) {
-            ctx->ClearState();
-            ctx->Flush();
-        }
+        DrainGpu(device, m_gpuDevice.GetContext());
         if (p->has_initial_data && p->initial_data_size > 0) {
             D3D11_SUBRESOURCE_DATA init_data = {};
             init_data.pSysMem = payload + sizeof(CreateBufferPayload);
@@ -602,11 +634,7 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
 
     hr = device->CreateTexture2D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
     if (FAILED(hr) && hr == E_OUTOFMEMORY) {
-        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
-        if (ctx) {
-            ctx->ClearState();
-            ctx->Flush();
-        }
+        DrainGpu(device, m_gpuDevice.GetContext());
         hr = device->CreateTexture2D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
     }
 
@@ -617,7 +645,8 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
                       << " (res_id=" << p->res_id << ", " << p->width << "x" << p->height
                       << ", fmt=" << p->format << ", mips=" << p->mips
                       << ", arr=" << p->array_size << ", usage=" << p->usage
-                      << ", bind=0x" << std::hex << p->bind_flags << std::dec << ")" << std::endl;
+                      << ", bind=0x" << std::hex << p->bind_flags << std::dec << ") "
+                      << VideoMemorySummary(device) << ", live resources: " << m_resources.Count() << std::endl;
         }
         return true; // Don't abort the session
     }
@@ -736,8 +765,7 @@ bool ServerDispatcher::HandleCreateTexture3D(const PacketHeader& /*header*/, con
     Microsoft::WRL::ComPtr<ID3D11Texture3D> texture;
     HRESULT hr = device->CreateTexture3D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
     if (FAILED(hr) && hr == E_OUTOFMEMORY) {
-        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
-        if (ctx) { ctx->ClearState(); ctx->Flush(); }
+        DrainGpu(device, m_gpuDevice.GetContext());
         hr = device->CreateTexture3D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
     }
     if (FAILED(hr)) {
@@ -835,8 +863,7 @@ bool ServerDispatcher::HandleCreateTexture1D(const PacketHeader& /*header*/, con
     Microsoft::WRL::ComPtr<ID3D11Texture1D> texture;
     HRESULT hr = device->CreateTexture1D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
     if (FAILED(hr) && hr == E_OUTOFMEMORY) {
-        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
-        if (ctx) { ctx->ClearState(); ctx->Flush(); }
+        DrainGpu(device, m_gpuDevice.GetContext());
         hr = device->CreateTexture1D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
     }
     if (FAILED(hr)) {
@@ -969,13 +996,13 @@ bool ServerDispatcher::HandleCreateRtv(const PacketHeader& /*header*/, const uin
     } else {
         Microsoft::WRL::ComPtr<ID3D11Resource> resource = m_resources.Get<ID3D11Resource>(p->resource_id);
         if (!resource) {
-            // Fallback: if client passes an ID representing the swapchain backbuffer, use host color texture
-            if (m_gpuDevice.GetColorTexture()) {
-                resource = m_gpuDevice.GetColorTexture();
-            } else {
+            // The texture failed to be created (e.g. out of memory). Never alias it to the host
+            // back buffer: later passes would draw their intermediate targets onto the screen.
+            static uint32_t s_rtvMissingRes = 0;
+            if (s_rtvMissingRes++ < 10) {
                 std::cerr << "[ServerDispatcher] CreateRtv: resource not found: " << p->resource_id << std::endl;
-                return false;
             }
+            return true;
         }
 
         D3D11_RENDER_TARGET_VIEW_DESC desc = {};
@@ -1072,15 +1099,11 @@ bool ServerDispatcher::HandleCreateDsv(const PacketHeader& /*header*/, const uin
     } else {
         Microsoft::WRL::ComPtr<ID3D11Resource> resource = m_resources.Get<ID3D11Resource>(p->resource_id);
         if (!resource) {
-            if (m_gpuDevice.GetDepthTexture()) {
-                resource = m_gpuDevice.GetDepthTexture();
-            } else {
-                static uint32_t s_dsvMissingRes = 0;
-                if (s_dsvMissingRes++ < 10) {
-                    std::cerr << "[ServerDispatcher] CreateDsv: resource not found: " << p->resource_id << std::endl;
-                }
-                return true; // Don't abort the session
+            static uint32_t s_dsvMissingRes = 0;
+            if (s_dsvMissingRes++ < 10) {
+                std::cerr << "[ServerDispatcher] CreateDsv: resource not found: " << p->resource_id << std::endl;
             }
+            return true; // Don't abort the session, and never alias to the host depth buffer
         }
 
         D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
@@ -1617,13 +1640,13 @@ bool ServerDispatcher::HandleOMSetRenderTargets(const PacketHeader& /*header*/, 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
     if (!context) return false;
 
+    // rtv_id 0 is the swap chain back buffer; any other id that is unknown (its texture failed to
+    // be created) must bind nothing instead of silently drawing onto the screen.
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
-    if (p->rtv_id != 0) {
-        rtv = m_resources.GetRTV(p->rtv_id);
-    }
-    // Fallback to host default offscreen render target if not explicitly in map
-    if (!rtv) {
+    if (p->rtv_id == 0) {
         rtv = m_gpuDevice.GetRenderTargetView();
+    } else {
+        rtv = m_resources.GetRTV(p->rtv_id);
     }
 
     // dsv_id == 0 means "no depth buffer", exactly like a null DSV in D3D11. Falling back to the
@@ -1829,10 +1852,7 @@ bool ServerDispatcher::HandleClearRtv(const PacketHeader& /*header*/, const uint
     if (p->res_id == 0) {
         rtv = m_gpuDevice.GetRenderTargetView();
     } else {
-        rtv = m_resources.GetRTV(p->res_id);
-        if (!rtv) {
-            rtv = m_gpuDevice.GetRenderTargetView();
-        }
+        rtv = m_resources.GetRTV(p->res_id); // unknown id: skip, do not clear the back buffer
     }
 
     if (rtv) {
@@ -1864,10 +1884,7 @@ bool ServerDispatcher::HandleClearDsv(const PacketHeader& /*header*/, const uint
     if (p->res_id == 0) {
         dsv = m_gpuDevice.GetDepthStencilView();
     } else {
-        dsv = m_resources.GetDSV(p->res_id);
-        if (!dsv) {
-            dsv = m_gpuDevice.GetDepthStencilView();
-        }
+        dsv = m_resources.GetDSV(p->res_id); // unknown id: skip
     }
 
     if (dsv) {
@@ -2646,7 +2663,9 @@ bool ServerDispatcher::HandlePresent(const PacketHeader& header, const uint8_t* 
     m_totalFramesPresented++;
     if (m_totalFramesPresented % 60 == 0 || m_totalFramesPresented == 1) {
         std::cout << "[Server] Active rendering: " << m_totalFramesPresented << " frames presented ("
-                  << width << "x" << height << ", active resources: " << m_resources.Count() << ")" << std::endl;
+                  << width << "x" << height << ", active resources: " << m_resources.Count() << ", "
+                  << VideoMemorySummary(m_gpuDevice.GetDevice()) << ")" << std::endl;
+        m_gpuDevice.DrainDebugMessages();
     }
     return true;
 }

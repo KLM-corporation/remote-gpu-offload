@@ -90,6 +90,11 @@ private:
     static bool ConfigureConnectedSocket(SOCKET sock, int timeout_ms = 10000);
 
     SOCKET m_socket;
+
+    // Receive-side read buffer (single reader per socket), see RecvExact().
+    std::vector<uint8_t> m_rxBuf;
+    size_t m_rxPos = 0;
+    size_t m_rxEnd = 0;
 };
 
 } // namespace RemoteGPU

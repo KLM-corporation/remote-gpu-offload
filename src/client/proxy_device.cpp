@@ -72,6 +72,7 @@ ProxyD3D11Device::~ProxyD3D11Device() {
         ShutdownPayload p = {};
         p.exit_code = 0;
         SendCommand(OP_SHUTDOWN, &p, sizeof(p), FLAG_ONEWAY);
+        FlushCommands();
     }
     if (m_receiver.joinable()) {
         // Queued data (OP_SHUTDOWN) is still delivered; the blocked recv in the receiver returns.
@@ -172,11 +173,42 @@ void ProxyD3D11Device::SetProxyContext(Microsoft::WRL::ComPtr<ProxyD3D11DeviceCo
 bool ProxyD3D11Device::SendPacket(const PacketHeader& header, const void* payload) {
     if (!m_socket || !m_socket->IsValid() || m_deviceRemoved) return false;
     std::lock_guard<std::mutex> lock(m_socketMutex);
-    if (!m_socket->SendPacket(header, payload)) {
+
+    // Command batching: a frame is ~4000 tiny commands. Sending each one with its own send()
+    // costs one syscall and one TCP segment per command; instead they are coalesced and
+    // flushed at Present (or any command that needs an answer), or when the batch is large.
+    constexpr size_t kBatchLimit = 256 * 1024;
+    const bool urgent = (header.flags & ~FLAG_ONEWAY) != 0;
+    bool ok = true;
+    if (header.payload_length >= kBatchLimit) {
+        ok = FlushSendBatchLocked() && m_socket->SendPacket(header, payload);
+    } else {
+        const auto* h = reinterpret_cast<const uint8_t*>(&header);
+        m_sendBatch.insert(m_sendBatch.end(), h, h + sizeof(header));
+        if (payload && header.payload_length) {
+            const auto* p = static_cast<const uint8_t*>(payload);
+            m_sendBatch.insert(m_sendBatch.end(), p, p + header.payload_length);
+        }
+        if (urgent || m_sendBatch.size() >= kBatchLimit) ok = FlushSendBatchLocked();
+    }
+    if (!ok) {
         m_deviceRemoved = true;
         return false;
     }
     return true;
+}
+
+bool ProxyD3D11Device::FlushSendBatchLocked() {
+    if (m_sendBatch.empty()) return true;
+    const bool ok = m_socket->SendExact(m_sendBatch.data(), m_sendBatch.size());
+    m_sendBatch.clear();
+    return ok;
+}
+
+bool ProxyD3D11Device::FlushCommands() {
+    if (!m_socket || !m_socket->IsValid() || m_deviceRemoved) return false;
+    std::lock_guard<std::mutex> lock(m_socketMutex);
+    return FlushSendBatchLocked();
 }
 
 bool ProxyD3D11Device::SendCommand(uint16_t opcode, const void* payload, uint32_t payload_len, uint16_t flags) {

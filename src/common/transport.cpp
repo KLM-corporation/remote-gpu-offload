@@ -48,8 +48,10 @@ NetworkSocket::~NetworkSocket() {
 }
 
 NetworkSocket::NetworkSocket(NetworkSocket&& other) noexcept
-    : m_socket(other.m_socket) {
+    : m_socket(other.m_socket),
+      m_rxBuf(std::move(other.m_rxBuf)), m_rxPos(other.m_rxPos), m_rxEnd(other.m_rxEnd) {
     other.m_socket = INVALID_SOCKET;
+    other.m_rxPos = other.m_rxEnd = 0;
 }
 
 NetworkSocket& NetworkSocket::operator=(NetworkSocket&& other) noexcept {
@@ -57,6 +59,10 @@ NetworkSocket& NetworkSocket::operator=(NetworkSocket&& other) noexcept {
         Close();
         m_socket = other.m_socket;
         other.m_socket = INVALID_SOCKET;
+        m_rxBuf = std::move(other.m_rxBuf);
+        m_rxPos = other.m_rxPos;
+        m_rxEnd = other.m_rxEnd;
+        other.m_rxPos = other.m_rxEnd = 0;
     }
     return *this;
 }
@@ -362,10 +368,40 @@ bool NetworkSocket::RecvExact(void* data, size_t length) {
     char* ptr = static_cast<char*>(data);
     size_t total_recv = 0;
 
+    // Receive buffering: the command stream is made of thousands of tiny packets per frame.
+    // Reading each header/payload with its own recv() costs two syscalls per command, so all
+    // reads are served from a 256 KB buffer refilled with a single recv() (large reads bypass it).
+    constexpr size_t kRxBufSize = 256 * 1024;
+
     while (total_recv < length) {
-        size_t remaining = length - total_recv;
-        int chunk_size = static_cast<int>(std::min<size_t>(remaining, 64 * 1024 * 1024));
-        int received = recv(m_socket, ptr + total_recv, chunk_size, 0);
+        const size_t buffered = m_rxEnd - m_rxPos;
+        if (buffered > 0) {
+            const size_t n = std::min(buffered, length - total_recv);
+            std::memcpy(ptr + total_recv, m_rxBuf.data() + m_rxPos, n);
+            m_rxPos += n;
+            total_recv += n;
+            continue;
+        }
+
+        const size_t remaining = length - total_recv;
+        const bool direct = remaining >= kRxBufSize;
+        char* target = nullptr;
+        int chunk_size = 0;
+        if (direct) {
+            target = ptr + total_recv;
+            chunk_size = static_cast<int>(std::min<size_t>(remaining, 64 * 1024 * 1024));
+        } else {
+            if (m_rxBuf.size() < kRxBufSize) m_rxBuf.resize(kRxBufSize);
+            target = reinterpret_cast<char*>(m_rxBuf.data());
+            chunk_size = static_cast<int>(kRxBufSize);
+        }
+        int received = recv(m_socket, target, chunk_size, 0);
+
+        if (received > 0 && !direct) {
+            m_rxPos = 0;
+            m_rxEnd = static_cast<size_t>(received);
+            continue;
+        }
 
         if (received == 0) {
             // Graceful EOF / connection closed by remote peer

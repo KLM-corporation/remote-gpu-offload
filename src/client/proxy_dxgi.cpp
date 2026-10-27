@@ -2,6 +2,7 @@
 #include "proxy_swapchain.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 
 namespace RemoteGPU {
@@ -234,7 +235,17 @@ HRESULT STDMETHODCALLTYPE ProxyDXGIAdapter::GetDesc1(DXGI_ADAPTER_DESC1* pDesc) 
     std::memset(pDesc, 0, sizeof(*pDesc));
     const std::string name = "RemoteGPU: " + m_info.description;
     MultiByteToWideChar(CP_UTF8, 0, name.c_str(), -1, pDesc->Description, ARRAYSIZE(pDesc->Description) - 1);
-    pDesc->DedicatedVideoMemory = static_cast<SIZE_T>(m_info.dedicated_vram);
+    // Games size their texture streaming pool as a percentage of the VRAM they see. Reporting
+    // the host's full 12 GB made Unreal Engine fill the card until CreateTexture2D failed with
+    // E_OUTOFMEMORY, so the value is capped (default 6 GB, override with RGPU_VRAM_MB).
+    uint64_t reported_vram = m_info.dedicated_vram;
+    uint64_t vram_cap = 6144ull * 1024 * 1024;
+    if (const char* cap_mb = std::getenv("RGPU_VRAM_MB")) {
+        const unsigned long long mb = std::strtoull(cap_mb, nullptr, 10);
+        if (mb > 0) vram_cap = mb * 1024ull * 1024ull;
+    }
+    if (reported_vram > vram_cap) reported_vram = vram_cap;
+    pDesc->DedicatedVideoMemory = static_cast<SIZE_T>(reported_vram);
     pDesc->AdapterLuid.LowPart = 0x52475055; // 'RGPU': stable, never matches a local adapter
     return S_OK;
 }

@@ -77,6 +77,7 @@ public:
     void NotifyResourceDestroyed(uint32_t res_id);
 
     bool SendPacket(const PacketHeader& header, const void* payload = nullptr);
+    bool FlushCommands(); // push any batched commands to the network
     bool SendCommand(uint16_t opcode, const void* payload, uint32_t payload_len, uint16_t flags = FLAG_NONE);
 
     std::shared_ptr<NetworkSocket> GetSocket() const noexcept { return m_socket; }
@@ -339,6 +340,8 @@ private:
     std::atomic<uint32_t>          m_nextSequenceId{1};
     volatile ULONG                 m_refCount{1};
     std::mutex                     m_socketMutex;
+    std::vector<uint8_t>           m_sendBatch;        // coalesced commands awaiting flush
+    bool FlushSendBatchLocked();
     bool                           m_deviceRemoved{false};
     RemoteAdapterInfo              m_adapterInfo;
     uint32_t                       m_targetWidth{0};

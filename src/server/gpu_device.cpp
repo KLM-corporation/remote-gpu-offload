@@ -3,6 +3,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 
 namespace RemoteGPU {
 
@@ -154,6 +155,11 @@ bool HostGpuDevice::InitializeDedicatedGpu(int adapter_index) {
 #if defined(_DEBUG)
     create_flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
+    // RGPU_DEBUG_LAYER=1 enables the Direct3D debug layer (needs the Windows "Graphics Tools"
+    // optional feature); its errors are printed, de-duplicated, with the status line.
+    if (const char* dbg = std::getenv("RGPU_DEBUG_LAYER")) {
+        if (dbg[0] == '1') create_flags |= D3D11_CREATE_DEVICE_DEBUG;
+    }
 
     const D3D_FEATURE_LEVEL feature_levels[] = {
         D3D_FEATURE_LEVEL_11_1,
@@ -235,6 +241,15 @@ bool HostGpuDevice::InitializeDedicatedGpu(int adapter_index) {
 
     std::cout << "[HostGpuDevice] Headless Direct3D 11 device created successfully. Feature Level: 0x"
               << std::hex << m_feature_level << std::dec << std::endl;
+
+    if (create_flags & D3D11_CREATE_DEVICE_DEBUG) {
+        if (SUCCEEDED(m_device.As(&m_info_queue))) {
+            std::cout << "[HostGpuDevice] Direct3D debug layer ACTIVE (RGPU_DEBUG_LAYER=1)" << std::endl;
+        }
+    } else if (std::getenv("RGPU_DEBUG_LAYER")) {
+        std::cout << "[HostGpuDevice] Debug layer unavailable: install the Windows optional feature "
+                     "\"Graphics Tools\"" << std::endl;
+    }
 
     return true;
 }
@@ -370,6 +385,27 @@ void HostGpuDevice::Clear(const float clear_color[4], float depth, uint8_t stenc
     if (m_dsv) {
         m_context->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, depth, stencil);
     }
+}
+
+void HostGpuDevice::DrainDebugMessages() {
+    if (!m_info_queue) return;
+    const UINT64 count = m_info_queue->GetNumStoredMessages();
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T len = 0;
+        if (FAILED(m_info_queue->GetMessage(i, nullptr, &len)) || len == 0) continue;
+        std::vector<uint8_t> buf(len);
+        auto* msg = reinterpret_cast<D3D11_MESSAGE*>(buf.data());
+        if (FAILED(m_info_queue->GetMessage(i, msg, &len))) continue;
+        if (msg->Severity > D3D11_MESSAGE_SEVERITY_WARNING) continue; // errors + corruption + warnings
+        std::string text(msg->pDescription, msg->DescriptionByteLength ? msg->DescriptionByteLength - 1 : 0);
+        // Resource names / addresses vary per call: key on the message id plus the first 90 chars.
+        const std::string key = std::to_string(static_cast<int>(msg->ID)) + ":" + text.substr(0, 90);
+        if (m_printed_debug_messages.size() < 80 && m_printed_debug_messages.insert(key).second) {
+            std::cout << "[D3D11 " << (msg->Severity <= D3D11_MESSAGE_SEVERITY_ERROR ? "ERROR" : "WARN") << "] "
+                      << text << std::endl;
+        }
+    }
+    m_info_queue->ClearStoredMessages();
 }
 
 bool HostGpuDevice::ReadbackFrame(std::vector<uint8_t>& out_rgba, uint32_t& out_width, uint32_t& out_height) {

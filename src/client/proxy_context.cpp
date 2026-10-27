@@ -265,7 +265,7 @@ void STDMETHODCALLTYPE ProxyD3D11DeviceContext::RSSetViewports(UINT NumViewports
 
 void STDMETHODCALLTYPE ProxyD3D11DeviceContext::OMSetRenderTargets(UINT NumViews, ID3D11RenderTargetView* const* ppRenderTargetViews,
                                                                    ID3D11DepthStencilView* pDepthStencilView) {
-    if (NumViews == 1 && ppRenderTargetViews) {
+    if (NumViews == 1 && ppRenderTargetViews && ppRenderTargetViews[0]) {
         // Common case: the original single-RTV opcode, understood by every server version.
         OMSetRenderTargetsPayload p = {};
         p.rtv_id = GetResourceIdFromCOM(ppRenderTargetViews[0]);
