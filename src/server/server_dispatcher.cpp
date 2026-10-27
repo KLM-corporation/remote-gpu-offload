@@ -109,8 +109,11 @@ bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket) {
 
         bool ok = DispatchCommand(header, payload.data(), payload.size(), &socket);
         if (!ok) {
-            std::cerr << "[ServerDispatcher] DispatchCommand failed for opcode: 0x"
-                      << std::hex << header.opcode << std::dec << std::endl;
+            static uint32_t s_dispatchFailCount = 0;
+            if (s_dispatchFailCount++ < 10) {
+                std::cerr << "[ServerDispatcher] DispatchCommand failed for opcode: 0x"
+                          << std::hex << header.opcode << std::dec << std::endl;
+            }
             if (header.opcode == OP_SHUTDOWN) {
                 break;
             }
@@ -126,6 +129,12 @@ bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket) {
 
 bool ServerDispatcher::DispatchCommand(const PacketHeader& header, const uint8_t* payload, size_t payload_size, NetworkSocket* socket) {
     m_totalCommandsProcessed++;
+    if ((m_totalCommandsProcessed % 1000) == 0) {
+        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
+        if (ctx) {
+            ctx->Flush();
+        }
+    }
 
     switch (header.opcode) {
         // 1. Session & Lifecycle
@@ -429,10 +438,28 @@ bool ServerDispatcher::HandleCreateBuffer(const PacketHeader& /*header*/, const 
         hr = device->CreateBuffer(&desc, nullptr, &buffer);
     }
 
+    if (FAILED(hr) && hr == E_OUTOFMEMORY) {
+        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
+        if (ctx) {
+            ctx->ClearState();
+            ctx->Flush();
+        }
+        if (p->has_initial_data && p->initial_data_size > 0) {
+            D3D11_SUBRESOURCE_DATA init_data = {};
+            init_data.pSysMem = payload + sizeof(CreateBufferPayload);
+            hr = device->CreateBuffer(&desc, &init_data, &buffer);
+        } else {
+            hr = device->CreateBuffer(&desc, nullptr, &buffer);
+        }
+    }
+
     if (FAILED(hr)) {
-        std::cerr << "[ServerDispatcher] CreateBuffer failed: 0x" << std::hex << hr << std::dec
-                  << " (res_id=" << p->res_id << ")" << std::endl;
-        return false;
+        static uint32_t s_bufFailCount = 0;
+        if (s_bufFailCount++ < 10) {
+            std::cerr << "[ServerDispatcher] CreateBuffer failed: 0x" << std::hex << hr << std::dec
+                      << " (res_id=" << p->res_id << ")" << std::endl;
+        }
+        return true; // Don't abort the session
     }
 
     m_resources.Register(p->res_id, buffer);
@@ -565,15 +592,34 @@ bool ServerDispatcher::HandleCreateTexture2D(const PacketHeader& /*header*/, con
     desc.CPUAccessFlags = p->cpu_access_flags;
     desc.MiscFlags = p->misc_flags;
 
+    // Direct3D 11 rule: Staging textures CANNOT have any bind flags
+    if (desc.Usage == D3D11_USAGE_STAGING) {
+        desc.BindFlags = 0;
+    }
+
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     HRESULT hr = S_OK;
 
     hr = device->CreateTexture2D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    if (FAILED(hr) && hr == E_OUTOFMEMORY) {
+        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
+        if (ctx) {
+            ctx->ClearState();
+            ctx->Flush();
+        }
+        hr = device->CreateTexture2D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    }
 
     if (FAILED(hr)) {
-        std::cerr << "[ServerDispatcher] CreateTexture2D failed: 0x" << std::hex << hr << std::dec
-                  << " (res_id=" << p->res_id << ")" << std::endl;
-        return false;
+        static uint32_t s_tex2DFailCount = 0;
+        if (s_tex2DFailCount++ < 10) {
+            std::cerr << "[ServerDispatcher] CreateTexture2D failed: 0x" << std::hex << hr << std::dec
+                      << " (res_id=" << p->res_id << ", " << p->width << "x" << p->height
+                      << ", fmt=" << p->format << ", mips=" << p->mips
+                      << ", arr=" << p->array_size << ", usage=" << p->usage
+                      << ", bind=0x" << std::hex << p->bind_flags << std::dec << ")" << std::endl;
+        }
+        return true; // Don't abort the session
     }
 
     m_resources.Register(p->res_id, texture);
@@ -689,10 +735,18 @@ bool ServerDispatcher::HandleCreateTexture3D(const PacketHeader& /*header*/, con
 
     Microsoft::WRL::ComPtr<ID3D11Texture3D> texture;
     HRESULT hr = device->CreateTexture3D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    if (FAILED(hr) && hr == E_OUTOFMEMORY) {
+        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
+        if (ctx) { ctx->ClearState(); ctx->Flush(); }
+        hr = device->CreateTexture3D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    }
     if (FAILED(hr)) {
-        std::cerr << "[ServerDispatcher] CreateTexture3D failed: 0x" << std::hex << hr << std::dec
-                  << " (res_id=" << p->res_id << ")" << std::endl;
-        return false;
+        static uint32_t s_tex3DFailCount = 0;
+        if (s_tex3DFailCount++ < 10) {
+            std::cerr << "[ServerDispatcher] CreateTexture3D failed: 0x" << std::hex << hr << std::dec
+                      << " (res_id=" << p->res_id << ")" << std::endl;
+        }
+        return true; // Don't abort the session
     }
 
     m_resources.Register(p->res_id, texture);
@@ -780,10 +834,18 @@ bool ServerDispatcher::HandleCreateTexture1D(const PacketHeader& /*header*/, con
 
     Microsoft::WRL::ComPtr<ID3D11Texture1D> texture;
     HRESULT hr = device->CreateTexture1D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    if (FAILED(hr) && hr == E_OUTOFMEMORY) {
+        ID3D11DeviceContext* ctx = m_gpuDevice.GetContext();
+        if (ctx) { ctx->ClearState(); ctx->Flush(); }
+        hr = device->CreateTexture1D(&desc, init_data.empty() ? nullptr : init_data.data(), &texture);
+    }
     if (FAILED(hr)) {
-        std::cerr << "[ServerDispatcher] CreateTexture1D failed: 0x" << std::hex << hr << std::dec
-                  << " (res_id=" << p->res_id << ")" << std::endl;
-        return false;
+        static uint32_t s_tex1DFailCount = 0;
+        if (s_tex1DFailCount++ < 10) {
+            std::cerr << "[ServerDispatcher] CreateTexture1D failed: 0x" << std::hex << hr << std::dec
+                      << " (res_id=" << p->res_id << ")" << std::endl;
+        }
+        return true; // Don't abort the session
     }
 
     m_resources.Register(p->res_id, texture);
@@ -1013,24 +1075,76 @@ bool ServerDispatcher::HandleCreateDsv(const PacketHeader& /*header*/, const uin
             if (m_gpuDevice.GetDepthTexture()) {
                 resource = m_gpuDevice.GetDepthTexture();
             } else {
-                std::cerr << "[ServerDispatcher] CreateDsv: resource not found: " << p->resource_id << std::endl;
-                return false;
+                static uint32_t s_dsvMissingRes = 0;
+                if (s_dsvMissingRes++ < 10) {
+                    std::cerr << "[ServerDispatcher] CreateDsv: resource not found: " << p->resource_id << std::endl;
+                }
+                return true; // Don't abort the session
             }
         }
 
         D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
         if (use_desc) {
             desc.Format = static_cast<DXGI_FORMAT>(p->format);
+            // Convert typeless formats to appropriate depth-stencil view formats
+            switch (desc.Format) {
+                case DXGI_FORMAT_R32G8X24_TYPELESS: desc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; break;
+                case DXGI_FORMAT_R32_TYPELESS:      desc.Format = DXGI_FORMAT_D32_FLOAT; break;
+                case DXGI_FORMAT_R24G8_TYPELESS:    desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; break;
+                case DXGI_FORMAT_R16_TYPELESS:      desc.Format = DXGI_FORMAT_D16_UNORM; break;
+                default: break;
+            }
+
             desc.ViewDimension = static_cast<D3D11_DSV_DIMENSION>(p->view_dimension);
             desc.Flags = p->flags;
-            desc.Texture2D.MipSlice = p->mip_slice;
+
+            if (desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DARRAY) {
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> tex2D;
+                if (SUCCEEDED(resource.As(&tex2D))) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    tex2D->GetDesc(&td);
+                    desc.Texture2DArray.MipSlice = p->mip_slice;
+                    desc.Texture2DArray.FirstArraySlice = 0;
+                    desc.Texture2DArray.ArraySize = td.ArraySize ? td.ArraySize : 1;
+                } else {
+                    desc.Texture2DArray.MipSlice = p->mip_slice;
+                    desc.Texture2DArray.FirstArraySlice = 0;
+                    desc.Texture2DArray.ArraySize = 1;
+                }
+            } else if (desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE1DARRAY) {
+                desc.Texture1DArray.MipSlice = p->mip_slice;
+                desc.Texture1DArray.FirstArraySlice = 0;
+                desc.Texture1DArray.ArraySize = 1;
+            } else if (desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY) {
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> tex2D;
+                if (SUCCEEDED(resource.As(&tex2D))) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    tex2D->GetDesc(&td);
+                    desc.Texture2DMSArray.FirstArraySlice = 0;
+                    desc.Texture2DMSArray.ArraySize = td.ArraySize ? td.ArraySize : 1;
+                } else {
+                    desc.Texture2DMSArray.FirstArraySlice = 0;
+                    desc.Texture2DMSArray.ArraySize = 1;
+                }
+            } else if (desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE1D) {
+                desc.Texture1D.MipSlice = p->mip_slice;
+            } else {
+                desc.Texture2D.MipSlice = p->mip_slice;
+            }
         }
 
         HRESULT hr = device->CreateDepthStencilView(resource.Get(), use_desc ? &desc : nullptr, &dsv);
+        if (FAILED(hr) && use_desc) {
+            // Fallback to default DSV
+            hr = device->CreateDepthStencilView(resource.Get(), nullptr, &dsv);
+        }
         if (FAILED(hr)) {
-            std::cerr << "[ServerDispatcher] CreateDepthStencilView failed: 0x" << std::hex << hr << std::dec
-                      << " (res_id=" << p->res_id << ")" << std::endl;
-            return false;
+            static uint32_t s_dsvFailures = 0;
+            if (s_dsvFailures++ < 10) {
+                std::cerr << "[ServerDispatcher] CreateDepthStencilView failed: 0x" << std::hex << hr << std::dec
+                          << " (res_id=" << p->res_id << ")" << std::endl;
+            }
+            return true; // Don't abort the connection
         }
     }
 
@@ -1201,9 +1315,12 @@ bool ServerDispatcher::HandleCreateInputLayout(const PacketHeader& /*header*/, c
     const D3D11_INPUT_ELEMENT_DESC* p_descs = (p->num_elements > 0) ? d3d_elements.data() : nullptr;
     HRESULT hr = device->CreateInputLayout(p_descs, p->num_elements, bytecode, p->bytecode_length, &layout);
     if (FAILED(hr)) {
-        std::cerr << "[ServerDispatcher] CreateInputLayout failed: 0x" << std::hex << hr << std::dec
-                  << " (res_id=" << p->res_id << ")" << std::endl;
-        return false;
+        static uint32_t s_layoutFailures = 0;
+        if (s_layoutFailures++ < 10) {
+            std::cerr << "[ServerDispatcher] CreateInputLayout failed: 0x" << std::hex << hr << std::dec
+                      << " (res_id=" << p->res_id << ")" << std::endl;
+        }
+        return true; // Don't abort the session
     }
 
     m_resources.Register(p->res_id, layout);
@@ -1700,11 +1817,9 @@ bool ServerDispatcher::HandleClearRtv(const PacketHeader& /*header*/, const uint
     if (size < sizeof(ClearRtvPayload)) return false;
     const auto* p = reinterpret_cast<const ClearRtvPayload*>(payload);
 
+    float color[4];
     for (int i = 0; i < 4; ++i) {
-        if (!std::isfinite(p->color[i])) {
-            std::cerr << "[ServerDispatcher] ClearRtv non-finite color component " << i << std::endl;
-            return false;
-        }
+        color[i] = std::isfinite(p->color[i]) ? p->color[i] : 0.0f;
     }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
@@ -1721,7 +1836,7 @@ bool ServerDispatcher::HandleClearRtv(const PacketHeader& /*header*/, const uint
     }
 
     if (rtv) {
-        context->ClearRenderTargetView(rtv.Get(), p->color);
+        context->ClearRenderTargetView(rtv.Get(), color);
     }
     return true;
 }
@@ -1731,13 +1846,15 @@ bool ServerDispatcher::HandleClearDsv(const PacketHeader& /*header*/, const uint
     const auto* p = reinterpret_cast<const ClearDsvPayload*>(payload);
 
     const UINT valid_mask = D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL;
-    if (p->clear_flags == 0 || (p->clear_flags & ~valid_mask) != 0) {
-        std::cerr << "[ServerDispatcher] ClearDsv invalid clear_flags: " << p->clear_flags << std::endl;
-        return false;
-    }
-    if (!std::isfinite(p->depth) || p->depth < 0.0f || p->depth > 1.0f) {
-        std::cerr << "[ServerDispatcher] ClearDsv invalid depth: " << p->depth << std::endl;
-        return false;
+    UINT clear_flags = p->clear_flags & valid_mask;
+    if (clear_flags == 0) clear_flags = D3D11_CLEAR_DEPTH;
+
+    float depth = p->depth;
+    if ((clear_flags & D3D11_CLEAR_DEPTH) != 0) {
+        if (!std::isfinite(depth) || depth < 0.0f) depth = 0.0f;
+        else if (depth > 1.0f) depth = 1.0f;
+    } else {
+        depth = 1.0f;
     }
 
     ID3D11DeviceContext* context = m_gpuDevice.GetContext();
@@ -1754,7 +1871,7 @@ bool ServerDispatcher::HandleClearDsv(const PacketHeader& /*header*/, const uint
     }
 
     if (dsv) {
-        context->ClearDepthStencilView(dsv.Get(), p->clear_flags, p->depth, p->stencil);
+        context->ClearDepthStencilView(dsv.Get(), clear_flags, depth, p->stencil);
     }
     return true;
 }
@@ -2529,7 +2646,7 @@ bool ServerDispatcher::HandlePresent(const PacketHeader& header, const uint8_t* 
     m_totalFramesPresented++;
     if (m_totalFramesPresented % 60 == 0 || m_totalFramesPresented == 1) {
         std::cout << "[Server] Active rendering: " << m_totalFramesPresented << " frames presented ("
-                  << width << "x" << height << ")" << std::endl;
+                  << width << "x" << height << ", active resources: " << m_resources.Count() << ")" << std::endl;
     }
     return true;
 }

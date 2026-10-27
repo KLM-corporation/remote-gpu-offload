@@ -627,8 +627,32 @@ public:
     ProxyRenderTargetView(uint32_t res_id, ID3D11Resource* pRes, const D3D11_RENDER_TARGET_VIEW_DESC* pDesc, ProxyD3D11Device* device)
         : ProxyResourceBase(res_id, device), m_resource(pRes)
     {
-        if (pDesc) m_desc = *pDesc;
-        else std::memset(&m_desc, 0, sizeof(m_desc));
+        if (pDesc) {
+            m_desc = *pDesc;
+        } else {
+            std::memset(&m_desc, 0, sizeof(m_desc));
+            if (pRes) {
+                D3D11_RESOURCE_DIMENSION dim;
+                pRes->GetType(&dim);
+                if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+                    if (SUCCEEDED(pRes->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                        D3D11_TEXTURE2D_DESC td;
+                        tex->GetDesc(&td);
+                        m_desc.Format = td.Format;
+                        if (td.ArraySize > 1) {
+                            m_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+                            m_desc.Texture2DArray.FirstArraySlice = 0;
+                            m_desc.Texture2DArray.ArraySize = td.ArraySize;
+                            m_desc.Texture2DArray.MipSlice = 0;
+                        } else {
+                            m_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                            m_desc.Texture2D.MipSlice = 0;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
@@ -678,8 +702,32 @@ public:
     ProxyDepthStencilView(uint32_t res_id, ID3D11Resource* pRes, const D3D11_DEPTH_STENCIL_VIEW_DESC* pDesc, ProxyD3D11Device* device)
         : ProxyResourceBase(res_id, device), m_resource(pRes)
     {
-        if (pDesc) m_desc = *pDesc;
-        else std::memset(&m_desc, 0, sizeof(m_desc));
+        if (pDesc) {
+            m_desc = *pDesc;
+        } else {
+            std::memset(&m_desc, 0, sizeof(m_desc));
+            if (pRes) {
+                D3D11_RESOURCE_DIMENSION dim;
+                pRes->GetType(&dim);
+                if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+                    if (SUCCEEDED(pRes->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                        D3D11_TEXTURE2D_DESC td;
+                        tex->GetDesc(&td);
+                        m_desc.Format = td.Format;
+                        if (td.ArraySize > 1) {
+                            m_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+                            m_desc.Texture2DArray.FirstArraySlice = 0;
+                            m_desc.Texture2DArray.ArraySize = td.ArraySize;
+                            m_desc.Texture2DArray.MipSlice = 0;
+                        } else {
+                            m_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+                            m_desc.Texture2D.MipSlice = 0;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
