@@ -2,16 +2,19 @@
 #ifndef REMOTE_GPU_GL_SERVER_DISPATCHER_H
 #define REMOTE_GPU_GL_SERVER_DISPATCHER_H
 
+#include "transport.h"
+#include "gl_host_device.h"
+#include "gl_protocol.h"
+
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 #include <GL/gl.h>
 
-#include "gl_host_device.h"
-#include "gl_protocol.h"
-#include "transport.h"
-
 namespace RemoteGPU {
+
+struct GlDispatchApi;
 
 /**
  * @brief Executes one OpenGL client session on a GlHostDevice.
@@ -21,7 +24,13 @@ namespace RemoteGPU {
  */
 class GlServerDispatcher {
 public:
-    GlServerDispatcher() = default;
+    GlServerDispatcher();
+    ~GlServerDispatcher();
+
+    GlServerDispatcher(const GlServerDispatcher&) = delete;
+    GlServerDispatcher& operator=(const GlServerDispatcher&) = delete;
+    GlServerDispatcher(GlServerDispatcher&&) noexcept;
+    GlServerDispatcher& operator=(GlServerDispatcher&&) noexcept;
 
     // `first` is the packet main() already read to pick the API (the handshake request).
     bool ProcessPacketStream(NetworkSocket& socket, const PacketHeader& first,
@@ -42,6 +51,7 @@ private:
     bool HandleCreateContext(const PacketHeader& header, const uint8_t* payload, size_t size, NetworkSocket& socket);
     bool HandleResize(const uint8_t* payload, size_t size);
     bool HandleSwap(const PacketHeader& header, const uint8_t* payload, size_t size, NetworkSocket& socket);
+    bool LoadGlApi();
 
     GlHostDevice m_device;
     bool     m_handshakeDone = false;
@@ -63,6 +73,8 @@ private:
     std::unordered_map<uint32_t, GLuint> m_shaders;
     std::unordered_map<uint32_t, GLuint> m_programs;
     uint32_t m_boundArrayBuffer = 0;
+
+    std::unique_ptr<GlDispatchApi> m_gl;
 };
 
 } // namespace RemoteGPU

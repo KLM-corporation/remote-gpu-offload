@@ -105,8 +105,14 @@ void DrawAndCheck(HDC hdc, const char* capture_path, int width, int height, cons
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    const char* capture_path = "gl_capture.bmp";
-    SetEnvironmentVariableA("RGPU_CAPTURE_FILE", capture_path);
+    char capture_buf[MAX_PATH] = "gl_capture.bmp";
+    char env_buf[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("RGPU_CAPTURE_FILE", env_buf, sizeof(env_buf)) > 0) {
+        std::strncpy(capture_buf, env_buf, sizeof(capture_buf) - 1);
+    } else {
+        SetEnvironmentVariableA("RGPU_CAPTURE_FILE", capture_buf);
+    }
+    const char* capture_path = capture_buf;
 
     WNDCLASSA wc = {};
     wc.lpfnWndProc = WndProc;
@@ -174,6 +180,18 @@ int main() {
     Pump();
     DrawAndCheck(hdc, capture_path, 320, 240, dark, "frame 3 (window just resized)");
     DrawAndCheck(hdc, capture_path, 400, 300, red, "frame 4 (new size)");
+
+    // Render foreground geometry onto the 400x300 frame for automated pixel verification.
+    std::remove(capture_path);
+    glViewport(0, 0, 400, 300);
+    glClearColor(0.05f, 0.05f, 0.15f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBegin(GL_TRIANGLES);
+    glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-0.7f, -0.7f);
+    glColor3f(0.0f, 1.0f, 0.0f); glVertex2f(0.7f, -0.7f);
+    glColor3f(0.0f, 0.0f, 1.0f); glVertex2f(0.0f, 0.7f);
+    glEnd();
+    Check(SwapBuffers(hdc) != FALSE, "final frame swap with geometry");
 
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(rc);

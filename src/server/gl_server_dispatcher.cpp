@@ -9,13 +9,6 @@
 
 namespace RemoteGPU {
 
-namespace {
-
-constexpr uint32_t kClearMaskAll = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_ACCUM_BUFFER_BIT;
-constexpr int32_t  kMaxViewportDim = 32768;
-constexpr GLenum kArrayBuffer = 0x8892;
-constexpr GLenum kElementArrayBuffer = 0x8893;
-
 using GenBuffersFn = void(WINAPI*)(GLsizei, GLuint*);
 using BindBufferFn = void(WINAPI*)(GLenum, GLuint);
 using BufferDataFn = void(WINAPI*)(GLenum, std::ptrdiff_t, const void*, GLenum);
@@ -39,19 +32,17 @@ struct GlDispatchApi {
     LinkProgramFn linkProgram = nullptr;
     UseProgramFn useProgram = nullptr;
 };
-GlDispatchApi g_gl;
+
+namespace {
+
+constexpr uint32_t kClearMaskAll = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_ACCUM_BUFFER_BIT;
+constexpr int32_t  kMaxViewportDim = 32768;
+constexpr GLenum kArrayBuffer = 0x8892;
+constexpr GLenum kElementArrayBuffer = 0x8893;
 
 template <typename T> bool LoadGl(T& fn, const char* name) {
     fn = reinterpret_cast<T>(reinterpret_cast<void*>(wglGetProcAddress(name)));
     return fn != nullptr;
-}
-
-bool LoadGlApi() {
-    return LoadGl(g_gl.genBuffers, "glGenBuffers") && LoadGl(g_gl.bindBuffer, "glBindBuffer") &&
-           LoadGl(g_gl.bufferData, "glBufferData") && LoadGl(g_gl.createShader, "glCreateShader") &&
-           LoadGl(g_gl.shaderSource, "glShaderSource") && LoadGl(g_gl.compileShader, "glCompileShader") &&
-           LoadGl(g_gl.createProgram, "glCreateProgram") && LoadGl(g_gl.attachShader, "glAttachShader") &&
-           LoadGl(g_gl.linkProgram, "glLinkProgram") && LoadGl(g_gl.useProgram, "glUseProgram");
 }
 
 bool ValidSize(uint32_t width, uint32_t height) {
@@ -75,6 +66,20 @@ bool SendReply(NetworkSocket& socket, uint16_t opcode, uint32_t sequence, const 
 }
 
 } // namespace
+
+GlServerDispatcher::GlServerDispatcher() : m_gl(std::make_unique<GlDispatchApi>()) {}
+GlServerDispatcher::~GlServerDispatcher() = default;
+GlServerDispatcher::GlServerDispatcher(GlServerDispatcher&&) noexcept = default;
+GlServerDispatcher& GlServerDispatcher::operator=(GlServerDispatcher&&) noexcept = default;
+
+bool GlServerDispatcher::LoadGlApi() {
+    if (!m_gl) m_gl = std::make_unique<GlDispatchApi>();
+    return LoadGl(m_gl->genBuffers, "glGenBuffers") && LoadGl(m_gl->bindBuffer, "glBindBuffer") &&
+           LoadGl(m_gl->bufferData, "glBufferData") && LoadGl(m_gl->createShader, "glCreateShader") &&
+           LoadGl(m_gl->shaderSource, "glShaderSource") && LoadGl(m_gl->compileShader, "glCompileShader") &&
+           LoadGl(m_gl->createProgram, "glCreateProgram") && LoadGl(m_gl->attachShader, "glAttachShader") &&
+           LoadGl(m_gl->linkProgram, "glLinkProgram") && LoadGl(m_gl->useProgram, "glUseProgram");
+}
 
 bool GlServerDispatcher::ProcessPacketStream(NetworkSocket& socket, const PacketHeader& first,
                                              const std::vector<uint8_t>& first_payload) {
@@ -243,7 +248,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 const auto a = ReadArgs<GlIdArgs>(args);
                 if (a.id == 0 || m_buffers.count(a.id)) return false;
                 Buffer buffer;
-                g_gl.genBuffers(1, &buffer.gl_id);
+                m_gl->genBuffers(1, &buffer.gl_id);
                 if (!buffer.gl_id) return false;
                 m_buffers.emplace(a.id, std::move(buffer));
                 break;
@@ -254,7 +259,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (a.target != kArrayBuffer && a.target != kElementArrayBuffer) return false;
                 if (a.id != 0 && !m_buffers.count(a.id)) return false;
                 if (a.target == kArrayBuffer) m_boundArrayBuffer = a.id;
-                g_gl.bindBuffer(a.target, a.id ? m_buffers[a.id].gl_id : 0);
+                m_gl->bindBuffer(a.target, a.id ? m_buffers[a.id].gl_id : 0);
                 break;
             }
             case GLF_BufferData: {
@@ -265,8 +270,8 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 auto& buffer = m_buffers[m_boundArrayBuffer];
                 buffer.target = a.target;
                 buffer.data.assign(args + sizeof(a), args + cmd.size);
-                g_gl.bindBuffer(a.target, buffer.gl_id);
-                g_gl.bufferData(a.target, static_cast<std::ptrdiff_t>(a.size), buffer.data.data(), a.usage);
+                m_gl->bindBuffer(a.target, buffer.gl_id);
+                m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(a.size), buffer.data.data(), a.usage);
                 break;
             }
             case GLF_DeleteBuffer: {
@@ -280,7 +285,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (cmd.size != sizeof(GlCreateShaderArgs)) return false;
                 const auto a = ReadArgs<GlCreateShaderArgs>(args);
                 if (a.id == 0 || m_shaders.count(a.id)) return false;
-                const GLuint shader = g_gl.createShader(a.type);
+                const GLuint shader = m_gl->createShader(a.type);
                 if (!shader) return false;
                 m_shaders.emplace(a.id, shader);
                 break;
@@ -289,7 +294,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (cmd.size != sizeof(GlIdArgs)) return false;
                 const auto a = ReadArgs<GlIdArgs>(args);
                 if (a.id == 0 || m_programs.count(a.id)) return false;
-                const GLuint program = g_gl.createProgram();
+                const GLuint program = m_gl->createProgram();
                 if (!program) return false;
                 m_programs.emplace(a.id, program);
                 break;
@@ -301,7 +306,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (it == m_shaders.end() || a.length != cmd.size - sizeof(a)) return false;
                 const char* source = reinterpret_cast<const char*>(args + sizeof(a));
                 const GLint source_length = static_cast<GLint>(a.length);
-                g_gl.shaderSource(it->second, 1, &source, &source_length);
+                m_gl->shaderSource(it->second, 1, &source, &source_length);
                 break;
             }
             case GLF_CompileShader: {
@@ -309,7 +314,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 const auto a = ReadArgs<GlIdArgs>(args);
                 auto it = m_shaders.find(a.id);
                 if (it == m_shaders.end()) return false;
-                g_gl.compileShader(it->second);
+                m_gl->compileShader(it->second);
                 break;
             }
             case GLF_AttachShader: {
@@ -317,7 +322,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 const auto a = ReadArgs<GlAttachShaderArgs>(args);
                 auto p = m_programs.find(a.program), s = m_shaders.find(a.shader);
                 if (p == m_programs.end() || s == m_shaders.end()) return false;
-                g_gl.attachShader(p->second, s->second);
+                m_gl->attachShader(p->second, s->second);
                 break;
             }
             case GLF_LinkProgram: {
@@ -325,14 +330,14 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 const auto a = ReadArgs<GlIdArgs>(args);
                 auto it = m_programs.find(a.id);
                 if (it == m_programs.end()) return false;
-                g_gl.linkProgram(it->second);
+                m_gl->linkProgram(it->second);
                 break;
             }
             case GLF_UseProgram: {
                 if (cmd.size != sizeof(GlIdArgs)) return false;
                 const auto a = ReadArgs<GlIdArgs>(args);
                 if (a.id != 0 && !m_programs.count(a.id)) return false;
-                g_gl.useProgram(a.id ? m_programs[a.id] : 0);
+                m_gl->useProgram(a.id ? m_programs[a.id] : 0);
                 break;
             }
             case GLF_DrawArrays: {

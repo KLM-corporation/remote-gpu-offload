@@ -2,6 +2,7 @@
 // loopback socket and receives well-formed and hostile packets from a raw client.
 // Usage: test_gl_server [base_port]   (each case uses its own port)
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -256,6 +257,103 @@ int main(int argc, char** argv) {
         FrameDataPayload meta = {};
         if (ok) std::memcpy(&meta, p.data(), sizeof(meta));
         Check(ok && meta.width == 48 && meta.height == 40, "resize changes the next frame's size");
+    }
+
+    std::printf("[gl_server] concurrent sessions\n");
+    {
+        uint16_t conc_port = port++;
+        NetworkSocket listener;
+        listener.BindAndListen(conc_port, "127.0.0.1");
+
+        std::atomic<bool> s1_ok{false}, s2_ok{false};
+        std::thread s1_worker([&] {
+            auto sock = listener.Accept(10000);
+            if (!sock) return;
+            PacketHeader first = {};
+            std::vector<uint8_t> payload;
+            if (!sock->RecvPacket(first, payload)) return;
+            GlServerDispatcher d1;
+            s1_ok = d1.ProcessPacketStream(*sock, first, payload);
+            sock->Close();
+        });
+        std::thread s2_worker([&] {
+            auto sock = listener.Accept(10000);
+            if (!sock) return;
+            PacketHeader first = {};
+            std::vector<uint8_t> payload;
+            if (!sock->RecvPacket(first, payload)) return;
+            GlServerDispatcher d2;
+            s2_ok = d2.ProcessPacketStream(*sock, first, payload);
+            sock->Close();
+        });
+
+        auto run_client = [](uint16_t p, uint32_t w, uint32_t h, float r, float g, float b, uint8_t er, uint8_t eg, uint8_t eb) -> bool {
+            NetworkSocket c;
+            if (!c.Connect("127.0.0.1", p, 10000)) return false;
+            uint32_t seq = 0;
+            auto send_pkt = [&](uint16_t op, const void* data, uint32_t sz) {
+                PacketHeader hdr = {RGPU_MAGIC, op, FLAG_NONE, ++seq, sz};
+                return c.SendPacket(hdr, sz ? data : nullptr);
+            };
+
+            HandshakeRequestPayload hello = {};
+            hello.protocol_version = RGPU_PROTOCOL_VERSION;
+            hello.client_flags = CLIENT_FLAG_API_OPENGL;
+            hello.client_width = w;
+            hello.client_height = h;
+            PacketHeader reply = {};
+            std::vector<uint8_t> pld;
+            if (!send_pkt(OP_HANDSHAKE_REQUEST, &hello, sizeof(hello)) || !c.RecvPacket(reply, pld) || reply.opcode != OP_HANDSHAKE_RESPONSE) return false;
+
+            GlCreateContextPayload ctx_req = {0, 0, 0, 0, w, h};
+            if (!send_pkt(OP_GL_CREATE_CONTEXT, &ctx_req, sizeof(ctx_req)) || !c.RecvPacket(reply, pld) || reply.opcode != OP_GL_CONTEXT_RESPONSE) return false;
+            GlContextResponsePayload ctx_resp = {};
+            std::memcpy(&ctx_resp, pld.data(), sizeof(ctx_resp));
+            if (ctx_resp.status != 0) return false;
+
+            std::vector<uint8_t> batch;
+            const GlViewportArgs vp = {0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)};
+            const GlClearColorArgs clr = {r, g, b, 1.0f};
+            const GlClearArgs msk = {0x4000};
+            AddCommand(batch, GLF_Viewport, &vp, sizeof(vp));
+            AddCommand(batch, GLF_ClearColor, &clr, sizeof(clr));
+            AddCommand(batch, GLF_Clear, &msk, sizeof(msk));
+            AddCommand(batch, GLF_Flush, nullptr, 0);
+
+            const GlSwapPayload swap = {101};
+            if (!send_pkt(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size())) ||
+                !send_pkt(OP_GL_SWAP, &swap, sizeof(swap)) ||
+                !c.RecvPacket(reply, pld) || reply.opcode != OP_FRAME_DATA || pld.size() < sizeof(FrameDataPayload)) return false;
+
+            FrameDataPayload meta = {};
+            std::memcpy(&meta, pld.data(), sizeof(meta));
+            if (meta.width != w || meta.height != h) return false;
+
+            std::vector<uint8_t> pixels(w * h * 4, 0);
+            const bool decoded = (reply.flags & FLAG_COMPRESSED)
+                ? FrameCodec::Decode(pld.data() + sizeof(meta), pld.size() - sizeof(meta), pixels.data(), w * h, false)
+                : (std::memcpy(pixels.data(), pld.data() + sizeof(meta), pixels.size()), true);
+            if (!decoded) return false;
+
+            const uint8_t* center = &pixels[((h / 2) * w + (w / 2)) * 4];
+            if (center[0] != er || center[1] != eg || center[2] != eb) return false;
+
+            ShutdownPayload shut = {};
+            send_pkt(OP_SHUTDOWN, &shut, sizeof(shut));
+            c.Close();
+            return true;
+        };
+
+        std::atomic<bool> c1_ok{false}, c2_ok{false};
+        std::thread t1([&] { c1_ok = run_client(conc_port, 64, 48, 0.0f, 1.0f, 0.0f, 0, 255, 0); });
+        std::thread t2([&] { c2_ok = run_client(conc_port, 40, 30, 0.0f, 0.0f, 1.0f, 0, 0, 255); });
+        t1.join();
+        t2.join();
+        s1_worker.join();
+        s2_worker.join();
+
+        Check(c1_ok && s1_ok, "concurrent session 1 (green 64x48) rendered correctly");
+        Check(c2_ok && s2_ok, "concurrent session 2 (blue 40x30) rendered correctly");
     }
 
     std::printf("\n%s\n", g_failures ? "GL SERVER TEST: FAILED" : "GL SERVER TEST: PASSED");

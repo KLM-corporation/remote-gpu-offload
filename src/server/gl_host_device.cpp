@@ -5,10 +5,9 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 
 namespace RemoteGPU {
-
-namespace {
 
 // Constants and entry points newer than OpenGL 1.1 (not in the system gl.h).
 constexpr GLenum kFramebuffer = 0x8D40;
@@ -51,7 +50,7 @@ struct GlApi {
     GlCheckFramebufferStatusFn checkFramebufferStatus = nullptr;
 };
 
-GlApi g_api; // The context belongs to one thread at a time, and so do these pointers.
+namespace {
 
 template <typename Fn>
 bool Load(Fn& fn, const char* name) {
@@ -59,36 +58,43 @@ bool Load(Fn& fn, const char* name) {
     return fn != nullptr;
 }
 
-bool LoadApi() {
-    return Load(g_api.genFramebuffers, "glGenFramebuffers") &&
-           Load(g_api.genRenderbuffers, "glGenRenderbuffers") &&
-           Load(g_api.deleteFramebuffers, "glDeleteFramebuffers") &&
-           Load(g_api.deleteRenderbuffers, "glDeleteRenderbuffers") &&
-           Load(g_api.bindFramebuffer, "glBindFramebuffer") &&
-           Load(g_api.bindRenderbuffer, "glBindRenderbuffer") &&
-           Load(g_api.bindBuffer, "glBindBuffer") &&
-           Load(g_api.renderbufferStorage, "glRenderbufferStorage") &&
-           Load(g_api.framebufferRenderbuffer, "glFramebufferRenderbuffer") &&
-           Load(g_api.checkFramebufferStatus, "glCheckFramebufferStatus");
-}
-
 const wchar_t kWindowClass[] = L"RemoteGpuGlHost";
+static std::once_flag g_wcOnce;
+static bool g_wcRegistered = false;
 
 bool EnsureWindowClass() {
-    static bool registered = false;
-    if (registered) return true;
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = DefWindowProcW;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = kWindowClass;
-    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
-    registered = true;
-    return true;
+    std::call_once(g_wcOnce, []() {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = DefWindowProcW;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kWindowClass;
+        if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+            g_wcRegistered = true;
+        }
+    });
+    return g_wcRegistered;
 }
 
 } // namespace
 
+GlHostDevice::GlHostDevice() : m_api(std::make_unique<GlApi>()) {}
 GlHostDevice::~GlHostDevice() { Destroy(); }
+GlHostDevice::GlHostDevice(GlHostDevice&&) noexcept = default;
+GlHostDevice& GlHostDevice::operator=(GlHostDevice&&) noexcept = default;
+
+bool GlHostDevice::LoadApi() {
+    if (!m_api) m_api = std::make_unique<GlApi>();
+    return Load(m_api->genFramebuffers, "glGenFramebuffers") &&
+           Load(m_api->genRenderbuffers, "glGenRenderbuffers") &&
+           Load(m_api->deleteFramebuffers, "glDeleteFramebuffers") &&
+           Load(m_api->deleteRenderbuffers, "glDeleteRenderbuffers") &&
+           Load(m_api->bindFramebuffer, "glBindFramebuffer") &&
+           Load(m_api->bindRenderbuffer, "glBindRenderbuffer") &&
+           Load(m_api->bindBuffer, "glBindBuffer") &&
+           Load(m_api->renderbufferStorage, "glRenderbufferStorage") &&
+           Load(m_api->framebufferRenderbuffer, "glFramebufferRenderbuffer") &&
+           Load(m_api->checkFramebufferStatus, "glCheckFramebufferStatus");
+}
 
 bool GlHostDevice::Create(uint32_t major, uint32_t minor, uint32_t profile_mask, uint32_t flags,
                           uint32_t width, uint32_t height) {
@@ -184,18 +190,19 @@ void GlHostDevice::Destroy() {
 }
 
 bool GlHostDevice::CreateAttachments(uint32_t width, uint32_t height) {
-    g_api.genFramebuffers(1, &m_fbo);
-    g_api.genRenderbuffers(1, &m_colorRb);
-    g_api.genRenderbuffers(1, &m_depthRb);
-    g_api.bindRenderbuffer(kRenderbuffer, m_colorRb);
-    g_api.renderbufferStorage(kRenderbuffer, kRgba8, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
-    g_api.bindRenderbuffer(kRenderbuffer, m_depthRb);
-    g_api.renderbufferStorage(kRenderbuffer, kDepth24Stencil8, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
-    g_api.bindRenderbuffer(kRenderbuffer, 0);
-    g_api.bindFramebuffer(kFramebuffer, m_fbo);
-    g_api.framebufferRenderbuffer(kFramebuffer, kColorAttachment0, kRenderbuffer, m_colorRb);
-    g_api.framebufferRenderbuffer(kFramebuffer, kDepthStencilAttachment, kRenderbuffer, m_depthRb);
-    if (g_api.checkFramebufferStatus(kFramebuffer) != kFramebufferComplete || glGetError() != GL_NO_ERROR) {
+    if (!m_api) return false;
+    m_api->genFramebuffers(1, &m_fbo);
+    m_api->genRenderbuffers(1, &m_colorRb);
+    m_api->genRenderbuffers(1, &m_depthRb);
+    m_api->bindRenderbuffer(kRenderbuffer, m_colorRb);
+    m_api->renderbufferStorage(kRenderbuffer, kRgba8, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    m_api->bindRenderbuffer(kRenderbuffer, m_depthRb);
+    m_api->renderbufferStorage(kRenderbuffer, kDepth24Stencil8, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    m_api->bindRenderbuffer(kRenderbuffer, 0);
+    m_api->bindFramebuffer(kFramebuffer, m_fbo);
+    m_api->framebufferRenderbuffer(kFramebuffer, kColorAttachment0, kRenderbuffer, m_colorRb);
+    m_api->framebufferRenderbuffer(kFramebuffer, kDepthStencilAttachment, kRenderbuffer, m_depthRb);
+    if (m_api->checkFramebufferStatus(kFramebuffer) != kFramebufferComplete || glGetError() != GL_NO_ERROR) {
         return false;
     }
     m_width = width;
@@ -206,11 +213,11 @@ bool GlHostDevice::CreateAttachments(uint32_t width, uint32_t height) {
 }
 
 void GlHostDevice::DestroyAttachments() {
-    if (!g_api.deleteFramebuffers) return;
-    g_api.bindFramebuffer(kFramebuffer, 0);
-    if (m_fbo) g_api.deleteFramebuffers(1, &m_fbo);
-    if (m_colorRb) g_api.deleteRenderbuffers(1, &m_colorRb);
-    if (m_depthRb) g_api.deleteRenderbuffers(1, &m_depthRb);
+    if (!m_api || !m_api->deleteFramebuffers) return;
+    m_api->bindFramebuffer(kFramebuffer, 0);
+    if (m_fbo) m_api->deleteFramebuffers(1, &m_fbo);
+    if (m_colorRb) m_api->deleteRenderbuffers(1, &m_colorRb);
+    if (m_depthRb) m_api->deleteRenderbuffers(1, &m_depthRb);
     m_fbo = m_colorRb = m_depthRb = 0;
 }
 
@@ -222,7 +229,7 @@ bool GlHostDevice::Resize(uint32_t width, uint32_t height) {
 }
 
 bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out) {
-    if (!m_glrc || m_width == 0 || m_height == 0) return false;
+    if (!m_glrc || m_width == 0 || m_height == 0 || !m_api) return false;
 
     GLint old_read_fbo = 0, old_pack_buffer = 0, old_alignment = 4, old_row_length = 0;
     glGetIntegerv(kReadFramebufferBinding, &old_read_fbo);
@@ -230,8 +237,8 @@ bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out) {
     glGetIntegerv(kPackAlignment, &old_alignment);
     glGetIntegerv(kPackRowLength, &old_row_length);
 
-    g_api.bindFramebuffer(kReadFramebuffer, m_fbo);
-    g_api.bindBuffer(kPixelPackBuffer, 0);
+    m_api->bindFramebuffer(kReadFramebuffer, m_fbo);
+    m_api->bindBuffer(kPixelPackBuffer, 0);
     glPixelStorei(kPackAlignment, 1);
     glPixelStorei(kPackRowLength, 0);
 
@@ -243,8 +250,8 @@ bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out) {
 
     glPixelStorei(kPackAlignment, old_alignment);
     glPixelStorei(kPackRowLength, old_row_length);
-    g_api.bindBuffer(kPixelPackBuffer, static_cast<GLuint>(old_pack_buffer));
-    g_api.bindFramebuffer(kReadFramebuffer, static_cast<GLuint>(old_read_fbo));
+    m_api->bindBuffer(kPixelPackBuffer, static_cast<GLuint>(old_pack_buffer));
+    m_api->bindFramebuffer(kReadFramebuffer, static_cast<GLuint>(old_read_fbo));
     if (!ok) return false;
 
     out.resize(m_bottomUp.size());

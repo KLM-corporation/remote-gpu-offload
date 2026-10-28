@@ -11,10 +11,13 @@
 
 #include <windows.h>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace RemoteGPU {
+
+struct GlApi;
 
 /**
  * @brief Server-side OpenGL context bound to the thread that created it.
@@ -25,11 +28,13 @@ namespace RemoteGPU {
  */
 class GlHostDevice {
 public:
-    GlHostDevice() = default;
+    GlHostDevice();
     ~GlHostDevice();
 
     GlHostDevice(const GlHostDevice&) = delete;
     GlHostDevice& operator=(const GlHostDevice&) = delete;
+    GlHostDevice(GlHostDevice&&) noexcept;
+    GlHostDevice& operator=(GlHostDevice&&) noexcept;
 
     // major == 0 requests a legacy context; otherwise a versioned one (falling back to legacy
     // when the driver refuses the attributes).
@@ -54,6 +59,7 @@ public:
 private:
     bool CreateAttachments(uint32_t width, uint32_t height);
     void DestroyAttachments();
+    bool LoadApi();
 
     HWND  m_hwnd = nullptr;
     HDC   m_hdc = nullptr;
@@ -69,6 +75,8 @@ private:
     uint32_t m_minor = 0;
     std::string m_renderer;
     std::vector<uint8_t> m_bottomUp;
+
+    std::unique_ptr<GlApi> m_api;
 };
 
 } // namespace RemoteGPU

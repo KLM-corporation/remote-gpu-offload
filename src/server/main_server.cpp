@@ -12,11 +12,16 @@
 #endif
 
 #include <windows.h>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
-#include <cstdlib>
-#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "protocol.h"
 #include "transport.h"
@@ -73,6 +78,200 @@ static void PrintUsage(const char* exe_name) {
               << "  -h, --help           Show this help message and exit\n"
               << std::endl;
 }
+
+static std::mutex g_cout_mutex;
+
+static void LogFrameStats(uint32_t session_id, uint64_t raw_bytes, uint64_t sent_bytes, bool compression) {
+    (void)session_id;
+    if (raw_bytes == 0) return;
+    const double raw_mb = raw_bytes / (1024.0 * 1024.0);
+    const double sent_mb = sent_bytes / (1024.0 * 1024.0);
+    std::lock_guard<std::mutex> lock(g_cout_mutex);
+    std::cout << "[Server] Frame stream: " << std::fixed << std::setprecision(2) << raw_mb << " MB rendered, "
+              << sent_mb << " MB sent (" << std::setprecision(1) << (100.0 * sent_mb / raw_mb) << "%, compression "
+              << (compression ? "on" : "off") << ")" << std::defaultfloat << std::endl;
+}
+
+static void HandleClientSession(
+    uint32_t session_id,
+    std::shared_ptr<NetworkSocket> client_sock,
+    HostGpuDevice& gpu,
+    std::mutex& d3d_mutex,
+    int adapter_index,
+    std::shared_ptr<std::atomic<bool>> done_flag)
+{
+    // A client may legitimately stay idle (minimised window, level loading), so the session
+    // must not end on a receive timeout. TCP keepalive detects peers that silently vanished.
+    client_sock->SetTimeouts(10000, 0);
+    if (!client_sock->EnableKeepAlive(5000, 1000)) {
+        std::lock_guard<std::mutex> lock(g_cout_mutex);
+        std::cerr << "[Server] Warning: TCP keepalive could not be enabled for this session." << std::endl;
+    }
+
+    // The first packet is the handshake; its flags say which graphics API the client speaks.
+    PacketHeader first = {};
+    std::vector<uint8_t> first_payload;
+    if (!client_sock->RecvPacket(first, first_payload)) {
+        {
+            std::lock_guard<std::mutex> lock(g_cout_mutex);
+            std::cout << "[Server] Client left before sending a handshake." << std::endl;
+        }
+        client_sock->Close();
+        if (done_flag) *done_flag = true;
+        return;
+    }
+
+    const bool is_opengl = first.opcode == OP_HANDSHAKE_REQUEST &&
+                           first_payload.size() >= sizeof(HandshakeRequestPayload) &&
+                           (reinterpret_cast<const HandshakeRequestPayload*>(first_payload.data())->client_flags &
+                            CLIENT_FLAG_API_OPENGL) != 0;
+
+    if (is_opengl) {
+        GlServerDispatcher gl_dispatcher;
+        {
+            std::lock_guard<std::mutex> lock(g_cout_mutex);
+            std::cout << "[Server] Session #" << session_id << " started (OpenGL). Processing command stream..." << std::endl;
+        }
+        const bool session_ok = gl_dispatcher.ProcessPacketStream(*client_sock, first, first_payload);
+        {
+            std::lock_guard<std::mutex> lock(g_cout_mutex);
+            std::cout << "[Server] Session #" << session_id << " finished (Status: "
+                      << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
+            std::cout << "[Server] Total commands executed: " << gl_dispatcher.GetTotalCommandsProcessed()
+                      << ", Total frames presented: " << gl_dispatcher.GetTotalFramesPresented() << std::endl;
+        }
+        LogFrameStats(session_id, gl_dispatcher.GetRawFrameBytes(), gl_dispatcher.GetSentFrameBytes(),
+                      gl_dispatcher.IsFrameCompressionEnabled());
+        client_sock->Close();
+    } else {
+        std::lock_guard<std::mutex> d3d_lock(d3d_mutex);
+        // Initialize the D3D device only when a D3D client actually connects.
+        if (!gpu.GetDevice()) {
+            {
+                std::lock_guard<std::mutex> lock(g_cout_mutex);
+                std::cout << "[Server] Enumerating DXGI adapters and initializing dedicated GPU..." << std::endl;
+            }
+            if (!gpu.InitializeDedicatedGpu(adapter_index)) {
+                {
+                    std::lock_guard<std::mutex> lock(g_cout_mutex);
+                    std::cerr << "[Server] Failed to initialize host GPU device; rejecting D3D session." << std::endl;
+                }
+                client_sock->Close();
+                if (done_flag) *done_flag = true;
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_cout_mutex);
+                std::cout << "[Server] Active GPU Adapter : " << gpu.GetAdapterDescription() << std::endl;
+                std::cout << "[Server] Vendor ID / Device : 0x" << std::hex << gpu.GetVendorId()
+                          << " / 0x" << gpu.GetDeviceId() << std::dec << std::endl;
+                std::cout << "[Server] Dedicated VRAM     : " << (gpu.GetDedicatedVram() / (1024 * 1024)) << " MB" << std::endl;
+                std::cout << "[Server] Shared System RAM  : " << (gpu.GetSharedRam() / (1024 * 1024)) << " MB" << std::endl;
+                std::cout << "[Server] Direct3D 11 Level  : 0x" << std::hex << gpu.GetFeatureLevel() << std::dec << std::endl;
+            }
+        }
+
+        ServerDispatcher dispatcher(gpu);
+
+        {
+            std::lock_guard<std::mutex> lock(g_cout_mutex);
+            std::cout << "[Server] Session #" << session_id << " started. Processing command stream..." << std::endl;
+        }
+        bool session_ok = dispatcher.ProcessPacketStream(*client_sock, &first, &first_payload);
+
+        {
+            std::lock_guard<std::mutex> lock(g_cout_mutex);
+            std::cout << "[Server] Session #" << session_id << " finished (Status: "
+                      << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
+            std::cout << "[Server] Total commands executed: " << dispatcher.GetTotalCommandsProcessed()
+                      << ", Total frames presented: " << dispatcher.GetTotalFramesPresented() << std::endl;
+        }
+        LogFrameStats(session_id, dispatcher.GetRawFrameBytes(), dispatcher.GetSentFrameBytes(),
+                      dispatcher.IsFrameCompressionEnabled());
+
+        // Clean disconnect handling: Close client socket & reset session state
+        client_sock->Close();
+        dispatcher.ResetSession();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_cout_mutex);
+        std::cout << "[Server] Session resources cleanly released. Ready for next connection." << std::endl;
+    }
+    if (done_flag) *done_flag = true;
+}
+
+class SessionManager {
+public:
+    void Add(uint32_t id, std::shared_ptr<NetworkSocket> socket,
+             std::shared_ptr<std::atomic<bool>> done, std::thread&& th) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_sessions.push_back({id, std::move(socket), std::move(done), std::move(th)});
+    }
+
+    void Prune() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto it = m_sessions.begin(); it != m_sessions.end(); ) {
+            if (it->done->load()) {
+                if (it->thread.joinable()) {
+                    it->thread.join();
+                }
+                it = m_sessions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void AbortActiveSockets() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& s : m_sessions) {
+            if (s.socket && s.socket->IsValid()) {
+                s.socket->Close();
+            }
+        }
+    }
+
+    void WaitForAll() {
+        while (true) {
+            Prune();
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_sessions.empty()) break;
+            }
+            if (!g_server_running) {
+                AbortActiveSockets();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        std::vector<std::thread> to_join;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (auto& s : m_sessions) {
+                if (s.thread.joinable()) {
+                    to_join.push_back(std::move(s.thread));
+                }
+            }
+            m_sessions.clear();
+        }
+        for (auto& t : to_join) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    }
+
+private:
+    struct SessionEntry {
+        uint32_t id;
+        std::shared_ptr<NetworkSocket> socket;
+        std::shared_ptr<std::atomic<bool>> done;
+        std::thread thread;
+    };
+    std::mutex m_mutex;
+    std::vector<SessionEntry> m_sessions;
+};
 
 int main(int argc, char* argv[]) {
     uint16_t port = RGPU_DEFAULT_PORT;
@@ -155,100 +354,44 @@ int main(int argc, char* argv[]) {
     std::cout << "[Server] Listening for client connections on " << bind_ip << ":" << port << "..." << std::endl;
     std::cout << "[Server] Ready to receive offloading workloads. Press Ctrl+C to terminate." << std::endl;
 
+    SessionManager session_mgr;
+    std::mutex d3d_mutex;
     uint32_t session_counter = 0;
 
     // 6. Main Connection Accept Loop
     while (g_server_running) {
+        session_mgr.Prune();
+
         // Accept with 500ms timeout to periodically evaluate g_server_running
-        auto client_sock = listen_sock.Accept(500);
-        if (!client_sock) {
+        auto raw_sock = listen_sock.Accept(500);
+        if (!raw_sock) {
             continue; // Timeout expired, re-check shutdown condition
         }
 
         session_counter++;
-        std::cout << "\n[Server] Client connection #" << session_counter << " accepted from "
-                  << client_sock->GetPeerAddress() << ":" << client_sock->GetPeerPort() << std::endl;
+        std::shared_ptr<NetworkSocket> client_sock = std::move(raw_sock);
 
-        // A client may legitimately stay idle (minimised window, level loading), so the session
-        // must not end on a receive timeout. TCP keepalive detects peers that silently vanished.
-        client_sock->SetTimeouts(10000, 0);
-        if (!client_sock->EnableKeepAlive(5000, 1000)) {
-            std::cerr << "[Server] Warning: TCP keepalive could not be enabled for this session." << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(g_cout_mutex);
+            std::cout << "\n[Server] Client connection #" << session_counter << " accepted from "
+                      << client_sock->GetPeerAddress() << ":" << client_sock->GetPeerPort() << std::endl;
         }
 
-        // The first packet is the handshake; its flags say which graphics API the client speaks.
-        PacketHeader first = {};
-        std::vector<uint8_t> first_payload;
-        if (!client_sock->RecvPacket(first, first_payload)) {
-            std::cout << "[Server] Client left before sending a handshake." << std::endl;
-            client_sock->Close();
-            if (single_session) break;
-            continue;
-        }
-        const bool is_opengl = first.opcode == OP_HANDSHAKE_REQUEST &&
-                               first_payload.size() >= sizeof(HandshakeRequestPayload) &&
-                               (reinterpret_cast<const HandshakeRequestPayload*>(first_payload.data())->client_flags &
-                                CLIENT_FLAG_API_OPENGL) != 0;
+        auto done_flag = std::make_shared<std::atomic<bool>>(false);
+        std::thread worker(
+            HandleClientSession,
+            session_counter,
+            client_sock,
+            std::ref(gpu),
+            std::ref(d3d_mutex),
+            adapter_index,
+            done_flag
+        );
 
-        auto report_frames = [](uint64_t raw_bytes, uint64_t sent_bytes, bool compression) {
-            if (raw_bytes == 0) return;
-            const double raw_mb = raw_bytes / (1024.0 * 1024.0);
-            const double sent_mb = sent_bytes / (1024.0 * 1024.0);
-            std::cout << "[Server] Frame stream: " << std::fixed << std::setprecision(2) << raw_mb << " MB rendered, "
-                      << sent_mb << " MB sent (" << std::setprecision(1) << (100.0 * sent_mb / raw_mb) << "%, compression "
-                      << (compression ? "on" : "off") << ")" << std::defaultfloat << std::endl;
-        };
-
-        if (is_opengl) {
-            GlServerDispatcher gl_dispatcher;
-            std::cout << "[Server] Session #" << session_counter << " started (OpenGL). Processing command stream..." << std::endl;
-            const bool session_ok = gl_dispatcher.ProcessPacketStream(*client_sock, first, first_payload);
-            std::cout << "[Server] Session #" << session_counter << " finished (Status: "
-                      << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
-            std::cout << "[Server] Total commands executed: " << gl_dispatcher.GetTotalCommandsProcessed()
-                      << ", Total frames presented: " << gl_dispatcher.GetTotalFramesPresented() << std::endl;
-            report_frames(gl_dispatcher.GetRawFrameBytes(), gl_dispatcher.GetSentFrameBytes(),
-                          gl_dispatcher.IsFrameCompressionEnabled());
-            client_sock->Close();
-        } else {
-            // Initialize the D3D device only when a D3D client actually connects.
-            if (!gpu.GetDevice()) {
-                std::cout << "[Server] Enumerating DXGI adapters and initializing dedicated GPU..." << std::endl;
-                if (!gpu.InitializeDedicatedGpu(adapter_index)) {
-                    std::cerr << "[Server] Failed to initialize host GPU device; rejecting D3D session." << std::endl;
-                    client_sock->Close();
-                    if (single_session) break;
-                    continue;
-                }
-                std::cout << "[Server] Active GPU Adapter : " << gpu.GetAdapterDescription() << std::endl;
-                std::cout << "[Server] Vendor ID / Device : 0x" << std::hex << gpu.GetVendorId()
-                          << " / 0x" << gpu.GetDeviceId() << std::dec << std::endl;
-                std::cout << "[Server] Dedicated VRAM     : " << (gpu.GetDedicatedVram() / (1024 * 1024)) << " MB" << std::endl;
-                std::cout << "[Server] Shared System RAM  : " << (gpu.GetSharedRam() / (1024 * 1024)) << " MB" << std::endl;
-                std::cout << "[Server] Direct3D 11 Level  : 0x" << std::hex << gpu.GetFeatureLevel() << std::dec << std::endl;
-            }
-
-            ServerDispatcher dispatcher(gpu);
-
-            std::cout << "[Server] Session #" << session_counter << " started. Processing command stream..." << std::endl;
-            bool session_ok = dispatcher.ProcessPacketStream(*client_sock, &first, &first_payload);
-
-            std::cout << "[Server] Session #" << session_counter << " finished (Status: "
-                      << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
-            std::cout << "[Server] Total commands executed: " << dispatcher.GetTotalCommandsProcessed()
-                      << ", Total frames presented: " << dispatcher.GetTotalFramesPresented() << std::endl;
-            report_frames(dispatcher.GetRawFrameBytes(), dispatcher.GetSentFrameBytes(),
-                          dispatcher.IsFrameCompressionEnabled());
-
-            // Clean disconnect handling: Close client socket & reset session state
-            client_sock->Close();
-            dispatcher.ResetSession();
-        }
-
-        std::cout << "[Server] Session resources cleanly released. Ready for next connection." << std::endl;
+        session_mgr.Add(session_counter, client_sock, done_flag, std::move(worker));
 
         if (single_session) {
-            std::cout << "[Server] --single-session specified: terminating server loop." << std::endl;
+            std::cout << "[Server] --single-session specified: terminating accept loop." << std::endl;
             break;
         }
     }
@@ -256,6 +399,9 @@ int main(int argc, char* argv[]) {
     // 7. Clean Shutdown & Resource Deallocation
     std::cout << "\n[Server] Shutting down listener socket..." << std::endl;
     listen_sock.Close();
+
+    std::cout << "[Server] Waiting for active client sessions to complete..." << std::endl;
+    session_mgr.WaitForAll();
 
     std::cout << "[Server] Releasing Host GPU resources..." << std::endl;
     gpu.Reset();
