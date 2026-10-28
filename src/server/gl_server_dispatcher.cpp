@@ -19,6 +19,7 @@ using BufferSubDataFn = void(WINAPI*)(GLenum, std::ptrdiff_t, std::ptrdiff_t, co
 using BindBufferRangeFn = void(WINAPI*)(GLenum, GLuint, GLuint, GLintptr, GLsizeiptr);
 using BindBufferBaseFn = void(WINAPI*)(GLenum, GLuint, GLuint);
 using DeleteBuffersFn = void(WINAPI*)(GLsizei, const GLuint*);
+using CopyBufferSubDataFn = void(WINAPI*)(GLenum, GLenum, GLintptr, GLintptr, GLsizeiptr);
 
 using CreateShaderFn = GLuint(WINAPI*)(GLenum);
 using ShaderSourceFn = void(WINAPI*)(GLuint, GLsizei, const char* const*, const GLint*);
@@ -64,6 +65,7 @@ struct GlDispatchApi {
     BindBufferRangeFn bindBufferRange = nullptr;
     BindBufferBaseFn bindBufferBase = nullptr;
     DeleteBuffersFn deleteBuffers = nullptr;
+    CopyBufferSubDataFn copyBufferSubData = nullptr;
 
     CreateShaderFn createShader = nullptr;
     ShaderSourceFn shaderSource = nullptr;
@@ -110,6 +112,20 @@ constexpr GLenum kArrayBuffer = 0x8892;
 constexpr GLenum kElementArrayBuffer = 0x8893;
 constexpr GLenum kUniformBuffer = 0x8A11;
 
+inline bool IsValidBufferTarget(GLenum target) {
+    return target == 0x8892 /*GL_ARRAY_BUFFER*/ ||
+           target == 0x8893 /*GL_ELEMENT_ARRAY_BUFFER*/ ||
+           target == 0x88EC /*GL_PIXEL_UNPACK_BUFFER*/ ||
+           target == 0x88ED /*GL_PIXEL_PACK_BUFFER*/ ||
+           target == 0x8A11 /*GL_UNIFORM_BUFFER*/ ||
+           target == 0x8C2C /*GL_TEXTURE_BUFFER*/ ||
+           target == 0x8C8E /*GL_TRANSFORM_FEEDBACK_BUFFER*/ ||
+           target == 0x8F36 /*GL_COPY_READ_BUFFER*/ ||
+           target == 0x8F37 /*GL_COPY_WRITE_BUFFER*/ ||
+           target == 0x8F3F /*GL_DRAW_INDIRECT_BUFFER*/ ||
+           target == 0x90D2 /*GL_SHADER_STORAGE_BUFFER*/;
+}
+
 template <typename T> bool LoadGl(T& fn, const char* name) {
     fn = reinterpret_cast<T>(reinterpret_cast<void*>(wglGetProcAddress(name)));
     return fn != nullptr;
@@ -153,6 +169,7 @@ bool GlServerDispatcher::LoadGlApi() {
     if (!base) return false;
 
     LoadGl(m_gl->bufferSubData, "glBufferSubData");
+    LoadGl(m_gl->copyBufferSubData, "glCopyBufferSubData");
     LoadGl(m_gl->bindBufferRange, "glBindBufferRange");
     LoadGl(m_gl->bindBufferBase, "glBindBufferBase");
     LoadGl(m_gl->deleteBuffers, "glDeleteBuffers");
@@ -363,7 +380,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_BindBuffer: {
                 if (cmd.size != sizeof(GlBindBufferArgs)) return false;
                 const auto a = ReadArgs<GlBindBufferArgs>(args);
-                if (a.target != kArrayBuffer && a.target != kElementArrayBuffer && a.target != kUniformBuffer) return false;
+                if (!IsValidBufferTarget(a.target)) return false;
                 if (a.id != 0 && !m_buffers.count(a.id)) return false;
                 m_boundBuffers[a.target] = a.id;
                 if (a.target == kArrayBuffer) m_boundArrayBuffer = a.id;
@@ -373,18 +390,23 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_BufferData: {
                 if (cmd.size < sizeof(GlBufferDataArgs)) return false;
                 const auto a = ReadArgs<GlBufferDataArgs>(args);
-                if ((a.target != kArrayBuffer && a.target != kElementArrayBuffer && a.target != kUniformBuffer) ||
-                    a.size > 64 * 1024 * 1024 || a.size != cmd.size - sizeof(a)) return false;
+                if (!IsValidBufferTarget(a.target) || a.size > 64 * 1024 * 1024) return false;
+                const bool hasData = (cmd.size == sizeof(a) + a.size);
+                if (!hasData && cmd.size != sizeof(a)) return false;
                 auto itBound = m_boundBuffers.find(a.target);
                 if (itBound == m_boundBuffers.end() || itBound->second == 0) return false;
                 auto itBuf = m_buffers.find(itBound->second);
                 if (itBuf == m_buffers.end()) return false;
                 auto& buffer = itBuf->second;
                 buffer.target = a.target;
-                buffer.data.assign(args + sizeof(a), args + cmd.size);
+                if (hasData) {
+                    buffer.data.assign(args + sizeof(a), args + cmd.size);
+                } else {
+                    buffer.data.clear();
+                }
                 m_gl->bindBuffer(a.target, buffer.gl_id);
                 m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(a.size),
-                                 buffer.data.empty() ? nullptr : buffer.data.data(), a.usage);
+                                 hasData ? buffer.data.data() : nullptr, a.usage);
                 break;
             }
             case GLF_DeleteBuffer: {
@@ -514,7 +536,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (cmd.size < sizeof(GlTexImage2DArgs)) return false;
                 const auto a = ReadArgs<GlTexImage2DArgs>(args);
                 if (cmd.size != sizeof(GlTexImage2DArgs) + a.data_size) return false;
-                const void* pixels = a.data_size ? (args + sizeof(GlTexImage2DArgs)) : nullptr;
+                const void* pixels = a.data_size ? (args + sizeof(GlTexImage2DArgs)) : reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pixel_offset));
                 glTexImage2D(a.target, a.level, a.internalformat, a.width, a.height, a.border, a.format, a.type, pixels);
                 break;
             }
@@ -522,7 +544,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (cmd.size < sizeof(GlTexSubImage2DArgs)) return false;
                 const auto a = ReadArgs<GlTexSubImage2DArgs>(args);
                 if (cmd.size != sizeof(GlTexSubImage2DArgs) + a.data_size) return false;
-                const void* pixels = a.data_size ? (args + sizeof(GlTexSubImage2DArgs)) : nullptr;
+                const void* pixels = a.data_size ? (args + sizeof(GlTexSubImage2DArgs)) : reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pixel_offset));
                 glTexSubImage2D(a.target, a.level, a.xoffset, a.yoffset, a.width, a.height, a.format, a.type, pixels);
                 break;
             }
@@ -749,6 +771,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_BufferSubData: {
                 if (cmd.size < sizeof(GlBufferSubDataArgs)) return false;
                 const auto a = ReadArgs<GlBufferSubDataArgs>(args);
+                if (!IsValidBufferTarget(a.target)) return false;
                 if (cmd.size != sizeof(GlBufferSubDataArgs) + a.size) return false;
                 const void* data = args + sizeof(GlBufferSubDataArgs);
                 if (m_gl->bufferSubData) {
@@ -836,6 +859,18 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (cmd.size != sizeof(GlPolygonModeArgs)) return false;
                 const auto a = ReadArgs<GlPolygonModeArgs>(args);
                 glPolygonMode(a.face, a.mode);
+                break;
+            }
+            case GLF_CopyBufferSubData: {
+                if (cmd.size != sizeof(GlCopyBufferSubDataArgs)) return false;
+                const auto a = ReadArgs<GlCopyBufferSubDataArgs>(args);
+                if (!IsValidBufferTarget(a.readTarget) || !IsValidBufferTarget(a.writeTarget)) return false;
+                if (m_gl->copyBufferSubData) {
+                    m_gl->copyBufferSubData(a.readTarget, a.writeTarget,
+                                            static_cast<std::ptrdiff_t>(a.readOffset),
+                                            static_cast<std::ptrdiff_t>(a.writeOffset),
+                                            static_cast<std::ptrdiff_t>(a.size));
+                }
                 break;
             }
             default:

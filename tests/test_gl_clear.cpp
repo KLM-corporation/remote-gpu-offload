@@ -207,6 +207,24 @@ int main() {
         uint32_t pixels[16 * 16] = {};
         pfnTexSubImage2D(0x0DE1 /*GL_TEXTURE_2D*/, 0, 0, 0, 16, 16, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, pixels);
         Check(true, "glTexSubImage2D called successfully");
+
+        using BindBufferFn = void(WINAPI*)(unsigned, unsigned);
+        using GenBuffersFn = void(WINAPI*)(int, unsigned*);
+        using BufferDataFn = void(WINAPI*)(unsigned, ptrdiff_t, const void*, unsigned);
+        auto pfnBindBuffer = reinterpret_cast<BindBufferFn>(reinterpret_cast<void*>(wglGetProcAddress("glBindBuffer")));
+        auto pfnGenBuffers = reinterpret_cast<GenBuffersFn>(reinterpret_cast<void*>(wglGetProcAddress("glGenBuffers")));
+        auto pfnBufferData = reinterpret_cast<BufferDataFn>(reinterpret_cast<void*>(wglGetProcAddress("glBufferData")));
+        if (pfnBindBuffer && pfnGenBuffers && pfnBufferData) {
+            unsigned pbo = 0;
+            pfnGenBuffers(1, &pbo);
+            pfnBindBuffer(0x88EC /*GL_PIXEL_UNPACK_BUFFER*/, pbo);
+            uint32_t pboData[32 * 32] = {};
+            pfnBufferData(0x88EC, sizeof(pboData), pboData, 0x88E4 /*GL_STATIC_DRAW*/);
+            // Pass an offset that would crash memcpy if treated as host memory!
+            pfnTexSubImage2D(0x0DE1 /*GL_TEXTURE_2D*/, 0, 0, 0, 16, 16, 0x1908 /*GL_RGBA*/, 0x1401, reinterpret_cast<const void*>(0x100));
+            pfnBindBuffer(0x88EC /*GL_PIXEL_UNPACK_BUFFER*/, 0);
+            Check(true, "glTexSubImage2D with bound PBO and offset called successfully");
+        }
     }
 
     using FenceSyncFn = void*(WINAPI*)(unsigned, unsigned);

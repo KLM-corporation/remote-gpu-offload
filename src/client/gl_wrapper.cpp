@@ -380,6 +380,13 @@ const unsigned char* WINAPI glGetStringi(unsigned name, unsigned index) {
     return reinterpret_cast<const unsigned char*>("");
 }
 
+struct ClientBuffer {
+    std::vector<uint8_t> storage;
+};
+static std::map<unsigned, ClientBuffer> g_clientBuffers;
+static std::map<unsigned, unsigned> g_currentBoundBuffers;
+static std::mutex g_bufferMutex;
+
 void WINAPI glGetIntegerv(unsigned pname, int* params) {
     if (!params) return;
     Log("[GL] glGetIntegerv(0x%X)", pname);
@@ -404,6 +411,31 @@ void WINAPI glGetIntegerv(unsigned pname, int* params) {
         case 0x8A34: *params = 256; break;   // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
         case 0x84FF: *params = 16; break;    // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
         case 0x9126: *params = 1; break;     // GL_CONTEXT_PROFILE_MASK (Core)
+        case 0x88EF: { // GL_PIXEL_UNPACK_BUFFER_BINDING
+            std::lock_guard<std::mutex> lock(g_bufferMutex);
+            *params = g_currentBoundBuffers[0x88EC];
+            break;
+        }
+        case 0x88ED: { // GL_PIXEL_PACK_BUFFER_BINDING
+            std::lock_guard<std::mutex> lock(g_bufferMutex);
+            *params = g_currentBoundBuffers[0x88ED];
+            break;
+        }
+        case 0x8894: { // GL_ARRAY_BUFFER_BINDING
+            std::lock_guard<std::mutex> lock(g_bufferMutex);
+            *params = g_currentBoundBuffers[0x8892];
+            break;
+        }
+        case 0x8895: { // GL_ELEMENT_ARRAY_BUFFER_BINDING
+            std::lock_guard<std::mutex> lock(g_bufferMutex);
+            *params = g_currentBoundBuffers[0x8893];
+            break;
+        }
+        case 0x8A28: { // GL_UNIFORM_BUFFER_BINDING
+            std::lock_guard<std::mutex> lock(g_bufferMutex);
+            *params = g_currentBoundBuffers[0x8A11];
+            break;
+        }
         case 0x0BA2: // GL_VIEWPORT
             params[0] = 0; params[1] = 0;
             params[2] = t_current ? t_current->session.Width() : kFallbackWidth;
@@ -503,17 +535,18 @@ void WINAPI glGetInteger64i_v(unsigned target, unsigned index, long long* data) 
     if (data) *data = 0;
 }
 
-struct ClientBuffer {
-    std::vector<uint8_t> storage;
-};
-static std::map<unsigned, ClientBuffer> g_clientBuffers;
-static std::map<unsigned, unsigned> g_currentBoundBuffers;
-static std::mutex g_bufferMutex;
-
 inline bool IsServerBufferTarget(unsigned target) {
     return target == 0x8892 /*GL_ARRAY_BUFFER*/ ||
            target == 0x8893 /*GL_ELEMENT_ARRAY_BUFFER*/ ||
-           target == 0x8A11 /*GL_UNIFORM_BUFFER*/;
+           target == 0x88EC /*GL_PIXEL_UNPACK_BUFFER*/ ||
+           target == 0x88ED /*GL_PIXEL_PACK_BUFFER*/ ||
+           target == 0x8A11 /*GL_UNIFORM_BUFFER*/ ||
+           target == 0x8C2C /*GL_TEXTURE_BUFFER*/ ||
+           target == 0x8C8E /*GL_TRANSFORM_FEEDBACK_BUFFER*/ ||
+           target == 0x8F36 /*GL_COPY_READ_BUFFER*/ ||
+           target == 0x8F37 /*GL_COPY_WRITE_BUFFER*/ ||
+           target == 0x8F3F /*GL_DRAW_INDIRECT_BUFFER*/ ||
+           target == 0x90D2 /*GL_SHADER_STORAGE_BUFFER*/;
 }
 
 void WINAPI glGetBufferParameteriv(unsigned target, unsigned pname, int* params) {
@@ -883,11 +916,25 @@ void WINAPI glTexImage2D(unsigned target, int level, int internalformat, int wid
         }
     }
     if (isProxy || !t_current) return;
-    const size_t byte_count = (pixels && width > 0 && height > 0) ? (static_cast<size_t>(width) * height * GetPixelSize(format, type)) : 0;
-    GlTexImage2DArgs args = {target, level, internalformat, width, height, border, format, type, static_cast<uint32_t>(byte_count)};
+    bool isPboBound = false;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        auto it = g_currentBoundBuffers.find(0x88EC /*GL_PIXEL_UNPACK_BUFFER*/);
+        if (it != g_currentBoundBuffers.end() && it->second != 0) {
+            isPboBound = true;
+        }
+    }
+    size_t byte_count = 0;
+    uint64_t pixel_offset = 0;
+    if (isPboBound) {
+        pixel_offset = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pixels));
+    } else if (pixels && width > 0 && height > 0) {
+        byte_count = static_cast<size_t>(width) * height * GetPixelSize(format, type);
+    }
+    GlTexImage2DArgs args = {target, level, internalformat, width, height, border, format, type, static_cast<uint32_t>(byte_count), 0, pixel_offset};
     std::vector<uint8_t> payload(sizeof(args) + byte_count);
     std::memcpy(payload.data(), &args, sizeof(args));
-    if (byte_count && pixels) std::memcpy(payload.data() + sizeof(args), pixels, byte_count);
+    if (!isPboBound && byte_count && pixels) std::memcpy(payload.data() + sizeof(args), pixels, byte_count);
     t_current->session.Append(GLF_TexImage2D, payload.data(), static_cast<uint32_t>(payload.size()));
 }
 
@@ -920,11 +967,25 @@ void WINAPI glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset
     Log("[GL] glTexSubImage2D(0x%X, level: %d, xoff: %d, yoff: %d, %dx%d, format: 0x%X, type: 0x%X, pixels: %p)",
         target, level, xoffset, yoffset, width, height, format, type, pixels);
     if (!t_current) return;
-    const size_t byte_count = (pixels && width > 0 && height > 0) ? (static_cast<size_t>(width) * height * GetPixelSize(format, type)) : 0;
-    GlTexSubImage2DArgs args = {target, level, xoffset, yoffset, width, height, format, type, static_cast<uint32_t>(byte_count)};
+    bool isPboBound = false;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        auto it = g_currentBoundBuffers.find(0x88EC /*GL_PIXEL_UNPACK_BUFFER*/);
+        if (it != g_currentBoundBuffers.end() && it->second != 0) {
+            isPboBound = true;
+        }
+    }
+    size_t byte_count = 0;
+    uint64_t pixel_offset = 0;
+    if (isPboBound) {
+        pixel_offset = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pixels));
+    } else if (pixels && width > 0 && height > 0) {
+        byte_count = static_cast<size_t>(width) * height * GetPixelSize(format, type);
+    }
+    GlTexSubImage2DArgs args = {target, level, xoffset, yoffset, width, height, format, type, static_cast<uint32_t>(byte_count), 0, pixel_offset};
     std::vector<uint8_t> payload(sizeof(args) + byte_count);
     std::memcpy(payload.data(), &args, sizeof(args));
-    if (byte_count && pixels) std::memcpy(payload.data() + sizeof(args), pixels, byte_count);
+    if (!isPboBound && byte_count && pixels) std::memcpy(payload.data() + sizeof(args), pixels, byte_count);
     t_current->session.Append(GLF_TexSubImage2D, payload.data(), static_cast<uint32_t>(payload.size()));
 }
 
@@ -1633,15 +1694,18 @@ void WINAPI glBufferData(unsigned target, ptrdiff_t size, const void* data, unsi
             buf.storage.resize(static_cast<size_t>(size));
             if (data && size > 0) {
                 std::memcpy(buf.storage.data(), data, static_cast<size_t>(size));
+            } else {
+                std::fill(buf.storage.begin(), buf.storage.end(), 0);
             }
         }
     }
     if (!t_current || size < 0 || static_cast<uint64_t>(size) > 64 * 1024 * 1024) return;
     if (IsServerBufferTarget(target)) {
         const GlBufferDataArgs args = {target, usage, static_cast<uint64_t>(size)};
-        std::vector<uint8_t> payload(sizeof(args) + static_cast<size_t>(size));
+        const size_t byte_count = data ? static_cast<size_t>(size) : 0;
+        std::vector<uint8_t> payload(sizeof(args) + byte_count);
         std::memcpy(payload.data(), &args, sizeof(args));
-        if (data && size) std::memcpy(payload.data() + sizeof(args), data, static_cast<size_t>(size));
+        if (data && byte_count) std::memcpy(payload.data() + sizeof(args), data, byte_count);
         t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
     }
 }
@@ -1938,22 +2002,33 @@ void WINAPI glCopyBufferSubData(unsigned readTarget, unsigned writeTarget,
     Log("[GL] glCopyBufferSubData(0x%X->0x%X, %td->%td, size: %td)",
         readTarget, writeTarget, readOffset, writeOffset, size);
     if (size <= 0 || readOffset < 0 || writeOffset < 0) return;
-    std::lock_guard<std::mutex> lock(g_bufferMutex);
-    unsigned readId = g_currentBoundBuffers[readTarget];
-    unsigned writeId = g_currentBoundBuffers[writeTarget];
-    if (readId && writeId && readId != writeId) {
-        auto itRead = g_clientBuffers.find(readId);
-        auto itWrite = g_clientBuffers.find(writeId);
-        if (itRead != g_clientBuffers.end() && itWrite != g_clientBuffers.end()) {
-            if (itRead->second.storage.size() >= static_cast<size_t>(readOffset + size)) {
-                if (itWrite->second.storage.size() < static_cast<size_t>(writeOffset + size)) {
-                    itWrite->second.storage.resize(static_cast<size_t>(writeOffset + size));
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        unsigned readId = g_currentBoundBuffers[readTarget];
+        unsigned writeId = g_currentBoundBuffers[writeTarget];
+        if (readId && writeId && readId != writeId) {
+            auto itRead = g_clientBuffers.find(readId);
+            auto itWrite = g_clientBuffers.find(writeId);
+            if (itRead != g_clientBuffers.end() && itWrite != g_clientBuffers.end()) {
+                if (itRead->second.storage.size() >= static_cast<size_t>(readOffset + size)) {
+                    if (itWrite->second.storage.size() < static_cast<size_t>(writeOffset + size)) {
+                        itWrite->second.storage.resize(static_cast<size_t>(writeOffset + size));
+                    }
+                    std::memcpy(itWrite->second.storage.data() + writeOffset,
+                                itRead->second.storage.data() + readOffset,
+                                static_cast<size_t>(size));
                 }
-                std::memcpy(itWrite->second.storage.data() + writeOffset,
-                            itRead->second.storage.data() + readOffset,
-                            static_cast<size_t>(size));
             }
         }
+    }
+    if (t_current) {
+        const GlCopyBufferSubDataArgs args = {
+            readTarget, writeTarget,
+            static_cast<uint64_t>(readOffset),
+            static_cast<uint64_t>(writeOffset),
+            static_cast<uint64_t>(size)
+        };
+        t_current->session.Append(GLF_CopyBufferSubData, &args, sizeof(args));
     }
 }
 

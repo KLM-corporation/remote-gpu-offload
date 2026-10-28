@@ -87,7 +87,8 @@ enum GlFunc : uint16_t {
     GLF_DepthFunc = 58,              // GlIdArgs
     GLF_DepthMask = 59,              // GlIdArgs
     GLF_ColorMask = 60,              // GlColorMaskArgs
-    GLF_PolygonMode = 61             // GlPolygonModeArgs
+    GLF_PolygonMode = 61,            // GlPolygonModeArgs
+    GLF_CopyBufferSubData = 62       // GlCopyBufferSubDataArgs
 };
 
 #pragma pack(push, 1)
@@ -150,6 +151,8 @@ struct GlTexImage2DArgs {
     uint32_t format;
     uint32_t type;
     uint32_t data_size;
+    uint32_t reserved;
+    uint64_t pixel_offset;
 };
 struct GlTexSubImage2DArgs {
     uint32_t target;
@@ -161,6 +164,8 @@ struct GlTexSubImage2DArgs {
     uint32_t format;
     uint32_t type;
     uint32_t data_size;
+    uint32_t reserved;
+    uint64_t pixel_offset;
 };
 struct GlBindSamplerArgs { uint32_t unit, sampler; };
 struct GlSamplerParameteriArgs { uint32_t sampler, pname; int32_t param; };
@@ -217,6 +222,13 @@ struct GlDrawElementsInstancedBaseVertexArgs {
 struct GlBlendFuncSeparateArgs { uint32_t srcRGB, dstRGB, srcAlpha, dstAlpha; };
 struct GlColorMaskArgs { uint8_t r, g, b, a; };
 struct GlPolygonModeArgs { uint32_t face, mode; };
+struct GlCopyBufferSubDataArgs {
+    uint32_t readTarget;
+    uint32_t writeTarget;
+    uint64_t readOffset;
+    uint64_t writeOffset;
+    uint64_t size;
+};
 
 #pragma pack(pop)
 
@@ -241,8 +253,8 @@ static_assert(sizeof(GlDrawArraysArgs) == 12);
 static_assert(sizeof(GlGenArgs) == 4);
 static_assert(sizeof(GlBindTextureArgs) == 8);
 static_assert(sizeof(GlTexParameteriArgs) == 12);
-static_assert(sizeof(GlTexImage2DArgs) == 36);
-static_assert(sizeof(GlTexSubImage2DArgs) == 36);
+static_assert(sizeof(GlTexImage2DArgs) == 48);
+static_assert(sizeof(GlTexSubImage2DArgs) == 48);
 static_assert(sizeof(GlBindSamplerArgs) == 8);
 static_assert(sizeof(GlSamplerParameteriArgs) == 12);
 static_assert(sizeof(GlBindFramebufferArgs) == 8);
@@ -254,6 +266,7 @@ static_assert(sizeof(GlVertexAttribDivisorArgs) == 8);
 static_assert(sizeof(GlBindBufferRangeArgs) == 32);
 static_assert(sizeof(GlBindBufferBaseArgs) == 12);
 static_assert(sizeof(GlBufferSubDataArgs) == 24);
+static_assert(sizeof(GlCopyBufferSubDataArgs) == 32);
 static_assert(sizeof(GlDrawElementsArgs) == 24);
 static_assert(sizeof(GlDrawArraysInstancedArgs) == 16);
 static_assert(sizeof(GlDrawElementsInstancedBaseVertexArgs) == 32);
