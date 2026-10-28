@@ -244,6 +244,7 @@ bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out) {
 
     const size_t row_bytes = static_cast<size_t>(m_width) * 4;
     m_bottomUp.resize(row_bytes * m_height);
+    while (glGetError() != GL_NO_ERROR); // Drain any prior error from application draw/state calls
     glReadPixels(0, 0, static_cast<GLsizei>(m_width), static_cast<GLsizei>(m_height),
                  GL_RGBA, GL_UNSIGNED_BYTE, m_bottomUp.data());
     const bool ok = glGetError() == GL_NO_ERROR;

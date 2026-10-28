@@ -72,6 +72,10 @@ private:
     std::unordered_map<uint32_t, Buffer> m_buffers;
     std::unordered_map<uint32_t, GLuint> m_shaders;
     std::unordered_map<uint32_t, GLuint> m_programs;
+    std::unordered_map<uint32_t, GLuint> m_textures;
+    std::unordered_map<uint32_t, GLuint> m_framebuffers;
+    std::unordered_map<uint32_t, GLuint> m_vaos;
+    std::unordered_map<uint32_t, GLuint> m_samplers;
     uint32_t m_boundArrayBuffer = 0;
     std::unordered_map<uint32_t, uint32_t> m_boundBuffers;
 

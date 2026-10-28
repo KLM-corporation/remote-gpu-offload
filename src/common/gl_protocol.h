@@ -35,7 +35,59 @@ enum GlFunc : uint16_t {
     GLF_AttachShader = 18, // GlAttachShaderArgs
     GLF_LinkProgram = 19, // GlIdArgs
     GLF_UseProgram = 20, // GlIdArgs
-    GLF_DrawArrays = 21 // GlDrawArraysArgs
+    GLF_DrawArrays = 21, // GlDrawArraysArgs
+
+    // Textures & Samplers
+    GLF_GenTextures = 22,       // GlGenArgs + uint32_t ids
+    GLF_BindTexture = 23,       // GlBindTextureArgs
+    GLF_DeleteTextures = 24,    // GlGenArgs + uint32_t ids
+    GLF_TexParameteri = 25,     // GlTexParameteriArgs
+    GLF_TexImage2D = 26,        // GlTexImage2DArgs + pixel bytes
+    GLF_TexSubImage2D = 27,     // GlTexSubImage2DArgs + pixel bytes
+    GLF_ActiveTexture = 28,     // GlIdArgs
+    GLF_GenerateMipmap = 29,    // GlIdArgs
+    GLF_GenSamplers = 30,       // GlGenArgs + uint32_t ids
+    GLF_BindSampler = 31,       // GlBindSamplerArgs
+    GLF_DeleteSamplers = 32,    // GlGenArgs + uint32_t ids
+    GLF_SamplerParameteri = 33, // GlSamplerParameteriArgs
+
+    // Framebuffers
+    GLF_GenFramebuffers = 34,        // GlGenArgs + uint32_t ids
+    GLF_BindFramebuffer = 35,        // GlBindFramebufferArgs
+    GLF_DeleteFramebuffers = 36,     // GlGenArgs + uint32_t ids
+    GLF_FramebufferTexture2D = 37,   // GlFramebufferTexture2DArgs
+    GLF_BlitFramebuffer = 38,        // GlBlitFramebufferArgs
+    GLF_DrawBuffer = 39,             // GlIdArgs
+    GLF_DrawBuffers = 40,            // GlDrawBuffersArgs + uint32_t buffers
+
+    // Vertex Array Objects & Attributes
+    GLF_GenVertexArrays = 41,        // GlGenArgs + uint32_t ids
+    GLF_BindVertexArray = 42,        // GlIdArgs
+    GLF_DeleteVertexArrays = 43,     // GlGenArgs + uint32_t ids
+    GLF_EnableVertexAttribArray = 44, // GlIdArgs
+    GLF_DisableVertexAttribArray = 45,// GlIdArgs
+    GLF_VertexAttribPointer = 46,    // GlVertexAttribPointerArgs
+    GLF_VertexAttribDivisor = 47,    // GlVertexAttribDivisorArgs
+
+    // Buffer range / UBO
+    GLF_BindBufferRange = 48,        // GlBindBufferRangeArgs
+    GLF_BindBufferBase = 49,         // GlBindBufferBaseArgs
+    GLF_BufferSubData = 50,          // GlBufferSubDataArgs + bytes
+
+    // Extended Draw Calls
+    GLF_DrawElements = 51,           // GlDrawElementsArgs
+    GLF_DrawArraysInstanced = 52,    // GlDrawArraysInstancedArgs
+    GLF_DrawElementsInstancedBaseVertex = 53, // GlDrawElementsInstancedBaseVertexArgs
+
+    // Pipeline & Raster State
+    GLF_Enable = 54,                 // GlIdArgs
+    GLF_Disable = 55,                // GlIdArgs
+    GLF_Scissor = 56,                // GlViewportArgs
+    GLF_BlendFuncSeparate = 57,      // GlBlendFuncSeparateArgs
+    GLF_DepthFunc = 58,              // GlIdArgs
+    GLF_DepthMask = 59,              // GlIdArgs
+    GLF_ColorMask = 60,              // GlColorMaskArgs
+    GLF_PolygonMode = 61             // GlPolygonModeArgs
 };
 
 #pragma pack(push, 1)
@@ -85,6 +137,87 @@ struct GlShaderSourceArgs { uint32_t id; uint32_t length; };
 struct GlAttachShaderArgs { uint32_t program, shader; };
 struct GlDrawArraysArgs  { uint32_t mode, first, count; };
 
+struct GlGenArgs { uint32_t count; };
+struct GlBindTextureArgs { uint32_t target, id; };
+struct GlTexParameteriArgs { uint32_t target, pname; int32_t param; };
+struct GlTexImage2DArgs {
+    uint32_t target;
+    int32_t  level;
+    int32_t  internalformat;
+    int32_t  width;
+    int32_t  height;
+    int32_t  border;
+    uint32_t format;
+    uint32_t type;
+    uint32_t data_size;
+};
+struct GlTexSubImage2DArgs {
+    uint32_t target;
+    int32_t  level;
+    int32_t  xoffset;
+    int32_t  yoffset;
+    int32_t  width;
+    int32_t  height;
+    uint32_t format;
+    uint32_t type;
+    uint32_t data_size;
+};
+struct GlBindSamplerArgs { uint32_t unit, sampler; };
+struct GlSamplerParameteriArgs { uint32_t sampler, pname; int32_t param; };
+
+struct GlBindFramebufferArgs { uint32_t target, id; };
+struct GlFramebufferTexture2DArgs { uint32_t target, attachment, textarget, texture; int32_t level; };
+struct GlBlitFramebufferArgs {
+    int32_t  srcX0, srcY0, srcX1, srcY1;
+    int32_t  dstX0, dstY0, dstX1, dstY1;
+    uint32_t mask;
+    uint32_t filter;
+};
+struct GlDrawBuffersArgs { uint32_t n; };
+
+struct GlVertexAttribPointerArgs {
+    uint32_t index;
+    int32_t  size;
+    uint32_t type;
+    uint8_t  normalized;
+    uint8_t  reserved[3];
+    int32_t  stride;
+    uint64_t pointer;
+};
+struct GlVertexAttribDivisorArgs { uint32_t index, divisor; };
+
+struct GlBindBufferRangeArgs {
+    uint32_t target;
+    uint32_t index;
+    uint32_t buffer;
+    uint32_t reserved;
+    uint64_t offset;
+    uint64_t size;
+};
+struct GlBindBufferBaseArgs { uint32_t target, index, buffer; };
+struct GlBufferSubDataArgs {
+    uint32_t target;
+    uint32_t reserved;
+    uint64_t offset;
+    uint64_t size;
+};
+
+struct GlDrawElementsArgs { uint32_t mode; int32_t count; uint32_t type; uint32_t reserved; uint64_t indices; };
+struct GlDrawArraysInstancedArgs { uint32_t mode; int32_t first, count, instancecount; };
+struct GlDrawElementsInstancedBaseVertexArgs {
+    uint32_t mode;
+    int32_t  count;
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t indices;
+    int32_t  instancecount;
+    int32_t  basevertex;
+};
+
+struct GlBlendFuncSeparateArgs { uint32_t srcRGB, dstRGB, srcAlpha, dstAlpha; };
+struct GlColorMaskArgs { uint8_t r, g, b, a; };
+struct GlPolygonModeArgs { uint32_t face, mode; };
+
 #pragma pack(pop)
 
 static_assert(sizeof(GlCreateContextPayload) == 24);
@@ -105,6 +238,28 @@ static_assert(sizeof(GlCreateShaderArgs) == 8);
 static_assert(sizeof(GlShaderSourceArgs) == 8);
 static_assert(sizeof(GlAttachShaderArgs) == 8);
 static_assert(sizeof(GlDrawArraysArgs) == 12);
+static_assert(sizeof(GlGenArgs) == 4);
+static_assert(sizeof(GlBindTextureArgs) == 8);
+static_assert(sizeof(GlTexParameteriArgs) == 12);
+static_assert(sizeof(GlTexImage2DArgs) == 36);
+static_assert(sizeof(GlTexSubImage2DArgs) == 36);
+static_assert(sizeof(GlBindSamplerArgs) == 8);
+static_assert(sizeof(GlSamplerParameteriArgs) == 12);
+static_assert(sizeof(GlBindFramebufferArgs) == 8);
+static_assert(sizeof(GlFramebufferTexture2DArgs) == 20);
+static_assert(sizeof(GlBlitFramebufferArgs) == 40);
+static_assert(sizeof(GlDrawBuffersArgs) == 4);
+static_assert(sizeof(GlVertexAttribPointerArgs) == 28);
+static_assert(sizeof(GlVertexAttribDivisorArgs) == 8);
+static_assert(sizeof(GlBindBufferRangeArgs) == 32);
+static_assert(sizeof(GlBindBufferBaseArgs) == 12);
+static_assert(sizeof(GlBufferSubDataArgs) == 24);
+static_assert(sizeof(GlDrawElementsArgs) == 24);
+static_assert(sizeof(GlDrawArraysInstancedArgs) == 16);
+static_assert(sizeof(GlDrawElementsInstancedBaseVertexArgs) == 32);
+static_assert(sizeof(GlBlendFuncSeparateArgs) == 16);
+static_assert(sizeof(GlColorMaskArgs) == 4);
+static_assert(sizeof(GlPolygonModeArgs) == 8);
 
 } // namespace RemoteGPU
 

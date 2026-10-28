@@ -54,6 +54,7 @@ public:
     uint32_t Height() const noexcept { return m_height; }
     uint32_t Major() const noexcept { return m_major; }
     uint32_t Minor() const noexcept { return m_minor; }
+    unsigned Fbo() const noexcept { return m_fbo; }
     const std::string& Renderer() const noexcept { return m_renderer; }
 
 private:

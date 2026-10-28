@@ -38,6 +38,25 @@ std::ofstream g_logFile;
 std::mutex g_logMutex;
 
 void Log(const char* fmt, ...) {
+    static int s_verbose = -1;
+    if (s_verbose == -1) {
+        char env[16] = {};
+        if (GetEnvironmentVariableA("RGPU_GL_VERBOSE", env, sizeof(env)) > 0) {
+            s_verbose = (env[0] == '1') ? 1 : 0;
+        } else {
+            s_verbose = 0;
+        }
+    }
+    if (!s_verbose) {
+        if (std::strncmp(fmt, "[WGL", 4) != 0 &&
+            std::strncmp(fmt, "[RemoteGPU", 10) != 0 &&
+            std::strncmp(fmt, "[DllMain", 8) != 0 &&
+            std::strncmp(fmt, "[ERROR", 6) != 0 &&
+            std::strncmp(fmt, "[wglGetProcAddress -> REGISTER_STUB", 35) != 0) {
+            return;
+        }
+    }
+
     std::lock_guard<std::mutex> lock(g_logMutex);
     static bool initialized = false;
     if (!initialized) {
@@ -134,7 +153,7 @@ void LogStubExecution(size_t index) {
     if (index >= kMaxStubs) return;
     const char* name = g_stubEntries[index].name;
     uint32_t count = ++g_stubEntries[index].callCount;
-    if (count <= 5 || (count % 250) == 0) {
+    if (count <= 2) {
         Log("[GL_STUB_CALLED #%u] %s", count, name ? name : "unknown");
     }
 }
@@ -545,13 +564,24 @@ void WINAPI glGetUniformfv(unsigned, int, float* params) {
 
 void WINAPI glBindFramebuffer(unsigned target, unsigned framebuffer) {
     Log("[GL] glBindFramebuffer(0x%X, %u)", target, framebuffer);
+    if (t_current) {
+        GlBindFramebufferArgs args = {target, framebuffer};
+        t_current->session.Append(GLF_BindFramebuffer, &args, sizeof(args));
+    }
 }
 
 void WINAPI glBindRenderbuffer(unsigned target, unsigned renderbuffer) {
     Log("[GL] glBindRenderbuffer(0x%X, %u)", target, renderbuffer);
 }
 
-void WINAPI glFramebufferTexture2D(unsigned, unsigned, unsigned, unsigned, int) {}
+void WINAPI glFramebufferTexture2D(unsigned target, unsigned attachment, unsigned textarget, unsigned texture, int level) {
+    Log("[GL] glFramebufferTexture2D(target: 0x%X, att: 0x%X, textarget: 0x%X, tex: %u, lvl: %d)",
+        target, attachment, textarget, texture, level);
+    if (t_current) {
+        GlFramebufferTexture2DArgs args = {target, attachment, textarget, texture, level};
+        t_current->session.Append(GLF_FramebufferTexture2D, &args, sizeof(args));
+    }
+}
 void WINAPI glFramebufferRenderbuffer(unsigned, unsigned, unsigned, unsigned) {}
 void WINAPI glFramebufferTextureLayer(unsigned target, unsigned attachment, unsigned texture, int level, int layer) {
     Log("[GL] glFramebufferTextureLayer(0x%X, 0x%X, %u, %d, %d)", target, attachment, texture, level, layer);
@@ -582,8 +612,23 @@ void WINAPI glGenFramebuffers(int count, unsigned* ids) {
     static unsigned next_id = 1;
     if (!ids || count < 0) return;
     for (int i = 0; i < count; ++i) ids[i] = next_id++;
+    if (t_current && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), ids, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_GenFramebuffers, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
-void WINAPI glDeleteFramebuffers(int, const unsigned*) {}
+void WINAPI glDeleteFramebuffers(int count, const unsigned* ids) {
+    if (t_current && ids && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), ids, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_DeleteFramebuffers, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+}
 
 static unsigned g_nextRenderbufferId = 1;
 void WINAPI glGenRenderbuffers(int count, unsigned* ids) {
@@ -602,9 +647,20 @@ void WINAPI glBlitFramebuffer(int srcX0, int srcY0, int srcX1, int srcY1,
                              unsigned mask, unsigned filter) {
     Log("[GL] glBlitFramebuffer(%d,%d,%d,%d -> %d,%d,%d,%d, mask: 0x%X, filter: 0x%X)",
         srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+    if (t_current) {
+        GlBlitFramebufferArgs args = {srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter};
+        t_current->session.Append(GLF_BlitFramebuffer, &args, sizeof(args));
+    }
 }
 void WINAPI glDrawBuffers(int n, const unsigned* bufs) {
     Log("[GL] glDrawBuffers(n: %d)", n);
+    if (t_current && bufs && n > 0) {
+        std::vector<uint8_t> payload(sizeof(GlDrawBuffersArgs) + n * sizeof(uint32_t));
+        GlDrawBuffersArgs args = {static_cast<uint32_t>(n)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), bufs, n * sizeof(uint32_t));
+        t_current->session.Append(GLF_DrawBuffers, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
 void WINAPI glGetBooleanv(unsigned pname, unsigned char* params) {
@@ -661,9 +717,62 @@ int WINAPI glGetUniformLocationARB(unsigned program, const char* name) {
     return static_cast<int>(next_location++);
 }
 
-void WINAPI glEnable(unsigned cap) { Log("[GL] glEnable(0x%X)", cap); }
-void WINAPI glDisable(unsigned cap) { Log("[GL] glDisable(0x%X)", cap); }
+void WINAPI glEnable(unsigned cap) {
+    Log("[GL] glEnable(0x%X)", cap);
+    if (t_current) {
+        GlIdArgs args = {cap};
+        t_current->session.Append(GLF_Enable, &args, sizeof(args));
+    }
+}
+void WINAPI glDisable(unsigned cap) {
+    Log("[GL] glDisable(0x%X)", cap);
+    if (t_current) {
+        GlIdArgs args = {cap};
+        t_current->session.Append(GLF_Disable, &args, sizeof(args));
+    }
+}
 unsigned char WINAPI glIsEnabled(unsigned) { return 1; }
+
+inline size_t GetPixelSize(unsigned format, unsigned type) {
+    size_t comp_size = 1;
+    switch (type) {
+        case 0x1400: /*GL_BYTE*/
+        case 0x1401: /*GL_UNSIGNED_BYTE*/ comp_size = 1; break;
+        case 0x1402: /*GL_SHORT*/
+        case 0x1403: /*GL_UNSIGNED_SHORT*/
+        case 0x140B: /*GL_HALF_FLOAT*/ comp_size = 2; break;
+        case 0x1404: /*GL_INT*/
+        case 0x1405: /*GL_UNSIGNED_INT*/
+        case 0x1406: /*GL_FLOAT*/ comp_size = 4; break;
+        case 0x8363: /*GL_UNSIGNED_SHORT_5_6_5*/
+        case 0x8033: /*GL_UNSIGNED_SHORT_4_4_4_4*/
+        case 0x8034: /*GL_UNSIGNED_SHORT_5_5_5_1*/ return 2;
+        case 0x8032: /*GL_UNSIGNED_INT_8_8_8_8*/
+        case 0x8367: /*GL_UNSIGNED_INT_8_8_8_8_REV*/
+        case 0x8368: /*GL_UNSIGNED_INT_10_10_10_2*/
+        case 0x84FA: /*GL_UNSIGNED_INT_24_8*/ return 4;
+        default: comp_size = 1; break;
+    }
+    size_t num_comps = 4;
+    switch (format) {
+        case 0x1902: /*GL_DEPTH_COMPONENT*/
+        case 0x1903: /*GL_RED*/
+        case 0x1906: /*GL_ALPHA*/
+        case 0x1909: /*GL_LUMINANCE*/
+        case 0x8229: /*GL_RED_INTEGER*/ num_comps = 1; break;
+        case 0x8227: /*GL_RG*/
+        case 0x190A: /*GL_LUMINANCE_ALPHA*/
+        case 0x822C: /*GL_RG_INTEGER*/ num_comps = 2; break;
+        case 0x1907: /*GL_RGB*/
+        case 0x80E0: /*GL_BGR*/
+        case 0x8D98: /*GL_RGB_INTEGER*/ num_comps = 3; break;
+        case 0x1908: /*GL_RGBA*/
+        case 0x80E1: /*GL_BGRA*/
+        case 0x8D99: /*GL_RGBA_INTEGER*/ num_comps = 4; break;
+        default: num_comps = 4; break;
+    }
+    return comp_size * num_comps;
+}
 
 // --- Textures & VAO Stubs/Trackers --------------------------------------------------------------
 static unsigned g_nextTextureId = 1;
@@ -674,30 +783,55 @@ void WINAPI glGenTextures(int count, unsigned* textures) {
     Log("[GL] glGenTextures(%d)", count);
     if (!textures || count < 0) return;
     for (int i = 0; i < count; ++i) textures[i] = g_nextTextureId++;
+    if (t_current && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), textures, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_GenTextures, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
 void WINAPI glBindTexture(unsigned target, unsigned texture) {
     Log("[GL] glBindTexture(target: 0x%X, id: %u)", target, texture);
+    if (t_current) {
+        GlBindTextureArgs args = {target, texture};
+        t_current->session.Append(GLF_BindTexture, &args, sizeof(args));
+    }
 }
 
-void WINAPI glDeleteTextures(int count, const unsigned*) {
+void WINAPI glDeleteTextures(int count, const unsigned* textures) {
     Log("[GL] glDeleteTextures(%d)", count);
+    if (t_current && textures && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), textures, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_DeleteTextures, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
 void WINAPI glTexParameteri(unsigned target, unsigned pname, int param) {
     Log("[GL] glTexParameteri(0x%X, 0x%X, %d)", target, pname, param);
+    if (t_current) {
+        GlTexParameteriArgs args = {target, pname, param};
+        t_current->session.Append(GLF_TexParameteri, &args, sizeof(args));
+    }
 }
 
 void WINAPI glTexParameterf(unsigned target, unsigned pname, float param) {
     Log("[GL] glTexParameterf(0x%X, 0x%X, %f)", target, pname, param);
+    glTexParameteri(target, pname, static_cast<int>(param));
 }
 
 void WINAPI glTexParameteriv(unsigned target, unsigned pname, const int* params) {
     Log("[GL] glTexParameteriv(0x%X, 0x%X)", target, pname);
+    if (params) glTexParameteri(target, pname, *params);
 }
 
 void WINAPI glTexParameterfv(unsigned target, unsigned pname, const float* params) {
     Log("[GL] glTexParameterfv(0x%X, 0x%X)", target, pname);
+    if (params) glTexParameteri(target, pname, static_cast<int>(*params));
 }
 
 void WINAPI glGetTexParameteriv(unsigned target, unsigned pname, int* params) {
@@ -736,16 +870,25 @@ void WINAPI glTexImage2D(unsigned target, int level, int internalformat, int wid
                           target == 0x851B /*GL_PROXY_TEXTURE_CUBE_MAP*/ ||
                           target == 0x8C1F /*GL_PROXY_TEXTURE_2D_ARRAY*/);
     const int maxDim = (target == 0x8070 || target == 0x851B) ? 2048 : 16384;
-    std::lock_guard<std::mutex> lock(g_proxyMutex);
-    if (isProxy) {
-        if (width > 0 && height > 0 && width <= maxDim && height <= maxDim) {
-            g_proxyTextures[{target, level}] = {width, height, internalformat};
+    {
+        std::lock_guard<std::mutex> lock(g_proxyMutex);
+        if (isProxy) {
+            if (width > 0 && height > 0 && width <= maxDim && height <= maxDim) {
+                g_proxyTextures[{target, level}] = {width, height, internalformat};
+            } else {
+                g_proxyTextures[{target, level}] = {0, 0, 0};
+            }
         } else {
-            g_proxyTextures[{target, level}] = {0, 0, 0};
+            g_proxyTextures[{target, level}] = {width, height, internalformat};
         }
-    } else {
-        g_proxyTextures[{target, level}] = {width, height, internalformat};
     }
+    if (isProxy || !t_current) return;
+    const size_t byte_count = (pixels && width > 0 && height > 0) ? (static_cast<size_t>(width) * height * GetPixelSize(format, type)) : 0;
+    GlTexImage2DArgs args = {target, level, internalformat, width, height, border, format, type, static_cast<uint32_t>(byte_count)};
+    std::vector<uint8_t> payload(sizeof(args) + byte_count);
+    std::memcpy(payload.data(), &args, sizeof(args));
+    if (byte_count && pixels) std::memcpy(payload.data() + sizeof(args), pixels, byte_count);
+    t_current->session.Append(GLF_TexImage2D, payload.data(), static_cast<uint32_t>(payload.size()));
 }
 
 void WINAPI glTexImage3D(unsigned target, int level, int internalformat, int width, int height, int depth,
@@ -776,6 +919,13 @@ void WINAPI glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset
                             unsigned format, unsigned type, const void* pixels) {
     Log("[GL] glTexSubImage2D(0x%X, level: %d, xoff: %d, yoff: %d, %dx%d, format: 0x%X, type: 0x%X, pixels: %p)",
         target, level, xoffset, yoffset, width, height, format, type, pixels);
+    if (!t_current) return;
+    const size_t byte_count = (pixels && width > 0 && height > 0) ? (static_cast<size_t>(width) * height * GetPixelSize(format, type)) : 0;
+    GlTexSubImage2DArgs args = {target, level, xoffset, yoffset, width, height, format, type, static_cast<uint32_t>(byte_count)};
+    std::vector<uint8_t> payload(sizeof(args) + byte_count);
+    std::memcpy(payload.data(), &args, sizeof(args));
+    if (byte_count && pixels) std::memcpy(payload.data() + sizeof(args), pixels, byte_count);
+    t_current->session.Append(GLF_TexSubImage2D, payload.data(), static_cast<uint32_t>(payload.size()));
 }
 
 void WINAPI glTexSubImage3D(unsigned target, int level, int xoffset, int yoffset, int zoffset,
@@ -792,6 +942,10 @@ void WINAPI glCopyTexSubImage2D(unsigned target, int level, int xoffset, int yof
 
 void WINAPI glGenerateMipmap(unsigned target) {
     Log("[GL] glGenerateMipmap(target: 0x%X)", target);
+    if (t_current) {
+        GlIdArgs args = {target};
+        t_current->session.Append(GLF_GenerateMipmap, &args, sizeof(args));
+    }
 }
 
 void WINAPI glCopyTexImage1D(unsigned target, int level, unsigned internalformat, int x, int y, int width, int border) {
@@ -839,6 +993,10 @@ void WINAPI glGetTexParameterIuiv(unsigned, unsigned, unsigned* params) {
 
 void WINAPI glActiveTexture(unsigned texture) {
     Log("[GL] glActiveTexture(0x%X)", texture);
+    if (t_current) {
+        GlIdArgs args = {texture};
+        t_current->session.Append(GLF_ActiveTexture, &args, sizeof(args));
+    }
 }
 
 void WINAPI glClientActiveTexture(unsigned texture) {
@@ -849,37 +1007,81 @@ void WINAPI glGenVertexArrays(int count, unsigned* arrays) {
     Log("[GL] glGenVertexArrays(%d)", count);
     if (!arrays || count < 0) return;
     for (int i = 0; i < count; ++i) arrays[i] = g_nextVaoId++;
+    if (t_current && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), arrays, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_GenVertexArrays, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
 void WINAPI glBindVertexArray(unsigned array) {
     Log("[GL] glBindVertexArray(%u)", array);
+    if (t_current) {
+        GlIdArgs args = {array};
+        t_current->session.Append(GLF_BindVertexArray, &args, sizeof(args));
+    }
 }
 
-void WINAPI glDeleteVertexArrays(int count, const unsigned*) {
+void WINAPI glDeleteVertexArrays(int count, const unsigned* arrays) {
     Log("[GL] glDeleteVertexArrays(%d)", count);
+    if (t_current && arrays && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), arrays, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_DeleteVertexArrays, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
 void WINAPI glVertexAttribPointer(unsigned index, int size, unsigned type, unsigned char normalized,
                                   int stride, const void* pointer) {
     Log("[GL] glVertexAttribPointer(idx: %u, size: %d, type: 0x%X, norm: %u, stride: %d, ptr: %p)",
         index, size, type, normalized, stride, pointer);
+    if (t_current) {
+        GlVertexAttribPointerArgs args = {
+            index, size, type, normalized, {0, 0, 0}, stride,
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pointer))
+        };
+        t_current->session.Append(GLF_VertexAttribPointer, &args, sizeof(args));
+    }
 }
 
 void WINAPI glVertexAttribIPointer(unsigned index, int size, unsigned type, int stride, const void* pointer) {
     Log("[GL] glVertexAttribIPointer(idx: %u, size: %d, type: 0x%X, stride: %d, ptr: %p)",
         index, size, type, stride, pointer);
+    if (t_current) {
+        GlVertexAttribPointerArgs args = {
+            index, size, type, 0, {0, 0, 0}, stride,
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pointer))
+        };
+        t_current->session.Append(GLF_VertexAttribPointer, &args, sizeof(args));
+    }
 }
 
 void WINAPI glVertexAttribDivisor(unsigned index, unsigned divisor) {
     Log("[GL] glVertexAttribDivisor(idx: %u, divisor: %u)", index, divisor);
+    if (t_current) {
+        GlVertexAttribDivisorArgs args = {index, divisor};
+        t_current->session.Append(GLF_VertexAttribDivisor, &args, sizeof(args));
+    }
 }
 
 void WINAPI glEnableVertexAttribArray(unsigned index) {
     Log("[GL] glEnableVertexAttribArray(%u)", index);
+    if (t_current) {
+        GlIdArgs args = {index};
+        t_current->session.Append(GLF_EnableVertexAttribArray, &args, sizeof(args));
+    }
 }
 
 void WINAPI glDisableVertexAttribArray(unsigned index) {
     Log("[GL] glDisableVertexAttribArray(%u)", index);
+    if (t_current) {
+        GlIdArgs args = {index};
+        t_current->session.Append(GLF_DisableVertexAttribArray, &args, sizeof(args));
+    }
 }
 
 int WINAPI glGetUniformLocation(unsigned program, const char* name) {
@@ -1088,10 +1290,18 @@ unsigned WINAPI glCheckFramebufferStatus(unsigned) {
 
 void WINAPI glBlendFunc(unsigned sfactor, unsigned dfactor) {
     Log("[GL] glBlendFunc(0x%X, 0x%X)", sfactor, dfactor);
+    if (t_current) {
+        GlBlendFuncSeparateArgs args = {sfactor, dfactor, sfactor, dfactor};
+        t_current->session.Append(GLF_BlendFuncSeparate, &args, sizeof(args));
+    }
 }
 
 void WINAPI glBlendFuncSeparate(unsigned sfactorRGB, unsigned dfactorRGB, unsigned sfactorAlpha, unsigned dfactorAlpha) {
     Log("[GL] glBlendFuncSeparate(0x%X, 0x%X, 0x%X, 0x%X)", sfactorRGB, dfactorRGB, sfactorAlpha, dfactorAlpha);
+    if (t_current) {
+        GlBlendFuncSeparateArgs args = {sfactorRGB, dfactorRGB, sfactorAlpha, dfactorAlpha};
+        t_current->session.Append(GLF_BlendFuncSeparate, &args, sizeof(args));
+    }
 }
 
 void WINAPI glBlendEquation(unsigned mode) {
@@ -1102,18 +1312,38 @@ void WINAPI glBlendEquationSeparate(unsigned modeRGB, unsigned modeAlpha) {
     Log("[GL] glBlendEquationSeparate(0x%X, 0x%X)", modeRGB, modeAlpha);
 }
 
-void WINAPI glDepthFunc(unsigned func) { Log("[GL] glDepthFunc(0x%X)", func); }
-void WINAPI glDepthMask(unsigned char flag) { Log("[GL] glDepthMask(%u)", flag); }
+void WINAPI glDepthFunc(unsigned func) {
+    Log("[GL] glDepthFunc(0x%X)", func);
+    if (t_current) {
+        GlIdArgs args = {func};
+        t_current->session.Append(GLF_DepthFunc, &args, sizeof(args));
+    }
+}
+void WINAPI glDepthMask(unsigned char flag) {
+    Log("[GL] glDepthMask(%u)", flag);
+    if (t_current) {
+        GlIdArgs args = {static_cast<uint32_t>(flag)};
+        t_current->session.Append(GLF_DepthMask, &args, sizeof(args));
+    }
+}
 void WINAPI glDepthRange(double nearVal, double farVal) { Log("[GL] glDepthRange(%f, %f)", nearVal, farVal); }
 void WINAPI glDepthRangef(float nearVal, float farVal) { glDepthRange(static_cast<double>(nearVal), static_cast<double>(farVal)); }
 void WINAPI glCullFace(unsigned mode) { Log("[GL] glCullFace(0x%X)", mode); }
 
 void WINAPI glScissor(int x, int y, int width, int height) {
     Log("[GL] glScissor(%d, %d, %d, %d)", x, y, width, height);
+    if (t_current) {
+        GlViewportArgs args = {x, y, width, height};
+        t_current->session.Append(GLF_Scissor, &args, sizeof(args));
+    }
 }
 
 void WINAPI glColorMask(unsigned char red, unsigned char green, unsigned char blue, unsigned char alpha) {
     Log("[GL] glColorMask(%u, %u, %u, %u)", red, green, blue, alpha);
+    if (t_current) {
+        GlColorMaskArgs args = {red, green, blue, alpha};
+        t_current->session.Append(GLF_ColorMask, &args, sizeof(args));
+    }
 }
 
 void WINAPI glColorMaski(unsigned index, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
@@ -1134,6 +1364,10 @@ void WINAPI glClearStencil(int s) {
 
 void WINAPI glPolygonMode(unsigned face, unsigned mode) {
     Log("[GL] glPolygonMode(0x%X, 0x%X)", face, mode);
+    if (t_current) {
+        GlPolygonModeArgs args = {face, mode};
+        t_current->session.Append(GLF_PolygonMode, &args, sizeof(args));
+    }
 }
 
 void WINAPI glPolygonOffset(float factor, float units) {
@@ -1197,10 +1431,24 @@ void WINAPI glGenSamplers(int count, unsigned* samplers) {
     for (int i = 0; i < count; ++i) {
         samplers[i] = g_nextSamplerId++;
     }
+    if (t_current && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), samplers, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_GenSamplers, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
-void WINAPI glDeleteSamplers(int count, const unsigned*) {
+void WINAPI glDeleteSamplers(int count, const unsigned* samplers) {
     Log("[GL] glDeleteSamplers(%d)", count);
+    if (t_current && samplers && count > 0) {
+        std::vector<uint8_t> payload(sizeof(GlGenArgs) + count * sizeof(uint32_t));
+        GlGenArgs args = {static_cast<uint32_t>(count)};
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), samplers, count * sizeof(uint32_t));
+        t_current->session.Append(GLF_DeleteSamplers, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
 }
 
 unsigned char WINAPI glIsSampler(unsigned id) {
@@ -1209,22 +1457,33 @@ unsigned char WINAPI glIsSampler(unsigned id) {
 
 void WINAPI glBindSampler(unsigned unit, unsigned sampler) {
     Log("[GL] glBindSampler(unit: %u, sampler: %u)", unit, sampler);
+    if (t_current) {
+        GlBindSamplerArgs args = {unit, sampler};
+        t_current->session.Append(GLF_BindSampler, &args, sizeof(args));
+    }
 }
 
 void WINAPI glSamplerParameteri(unsigned sampler, unsigned pname, int param) {
     Log("[GL] glSamplerParameteri(sampler: %u, pname: 0x%X, param: %d)", sampler, pname, param);
+    if (t_current) {
+        GlSamplerParameteriArgs args = {sampler, pname, param};
+        t_current->session.Append(GLF_SamplerParameteri, &args, sizeof(args));
+    }
 }
 
 void WINAPI glSamplerParameterf(unsigned sampler, unsigned pname, float param) {
     Log("[GL] glSamplerParameterf(sampler: %u, pname: 0x%X, param: %f)", sampler, pname, param);
+    glSamplerParameteri(sampler, pname, static_cast<int>(param));
 }
 
 void WINAPI glSamplerParameteriv(unsigned sampler, unsigned pname, const int* params) {
     Log("[GL] glSamplerParameteriv(sampler: %u, pname: 0x%X)", sampler, pname);
+    if (params) glSamplerParameteri(sampler, pname, *params);
 }
 
 void WINAPI glSamplerParameterfv(unsigned sampler, unsigned pname, const float* params) {
     Log("[GL] glSamplerParameterfv(sampler: %u, pname: 0x%X)", sampler, pname);
+    if (params) glSamplerParameteri(sampler, pname, static_cast<int>(*params));
 }
 
 void WINAPI glGetSamplerParameteriv(unsigned, unsigned, int* params) {
@@ -1389,7 +1648,6 @@ void WINAPI glBufferData(unsigned target, ptrdiff_t size, const void* data, unsi
 
 void WINAPI glBufferSubData(unsigned target, ptrdiff_t offset, ptrdiff_t size, const void* data) {
     Log("[GL] glBufferSubData(target: 0x%X, offset: %td, size: %td, data: %p)", target, offset, size, data);
-    std::vector<uint8_t> fullBufferCopy;
     {
         std::lock_guard<std::mutex> lock(g_bufferMutex);
         unsigned boundId = g_currentBoundBuffers[target];
@@ -1399,17 +1657,14 @@ void WINAPI glBufferSubData(unsigned target, ptrdiff_t offset, ptrdiff_t size, c
                 buf.storage.resize(static_cast<size_t>(offset + size));
             }
             std::memcpy(buf.storage.data() + offset, data, static_cast<size_t>(size));
-            if (IsServerBufferTarget(target)) {
-                fullBufferCopy = buf.storage;
-            }
         }
     }
-    if (!fullBufferCopy.empty() && t_current && fullBufferCopy.size() <= 64 * 1024 * 1024) {
-        const GlBufferDataArgs args = {target, 0x88E4 /*GL_STATIC_DRAW*/, static_cast<uint64_t>(fullBufferCopy.size())};
-        std::vector<uint8_t> payload(sizeof(args) + fullBufferCopy.size());
+    if (t_current && data && size > 0 && offset >= 0 && size <= 64 * 1024 * 1024) {
+        const GlBufferSubDataArgs args = {target, 0, static_cast<uint64_t>(offset), static_cast<uint64_t>(size)};
+        std::vector<uint8_t> payload(sizeof(args) + static_cast<size_t>(size));
         std::memcpy(payload.data(), &args, sizeof(args));
-        std::memcpy(payload.data() + sizeof(args), fullBufferCopy.data(), fullBufferCopy.size());
-        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+        std::memcpy(payload.data() + sizeof(args), data, static_cast<size_t>(size));
+        t_current->session.Append(GLF_BufferSubData, payload.data(), static_cast<uint32_t>(payload.size()));
     }
 }
 
@@ -1511,11 +1766,19 @@ void WINAPI glGetBufferPointerv(unsigned target, unsigned pname, void** params) 
 void WINAPI glBindBufferRange(unsigned target, unsigned index, unsigned buffer, ptrdiff_t offset, ptrdiff_t size) {
     Log("[GL] glBindBufferRange(target: 0x%X, idx: %u, buf: %u, offset: %td, size: %td)", target, index, buffer, offset, size);
     glBindBuffer(target, buffer);
+    if (t_current) {
+        GlBindBufferRangeArgs args = {target, index, buffer, 0, static_cast<uint64_t>(offset), static_cast<uint64_t>(size)};
+        t_current->session.Append(GLF_BindBufferRange, &args, sizeof(args));
+    }
 }
 
 void WINAPI glBindBufferBase(unsigned target, unsigned index, unsigned buffer) {
     Log("[GL] glBindBufferBase(target: 0x%X, idx: %u, buf: %u)", target, index, buffer);
     glBindBuffer(target, buffer);
+    if (t_current) {
+        GlBindBufferBaseArgs args = {target, index, buffer};
+        t_current->session.Append(GLF_BindBufferBase, &args, sizeof(args));
+    }
 }
 
 unsigned WINAPI glCreateShader(unsigned type) {
@@ -1587,21 +1850,33 @@ void WINAPI glDrawArrays(unsigned mode, int first, int count) {
 
 void WINAPI glDrawElements(unsigned mode, int count, unsigned type, const void* indices) {
     Log("[GL] glDrawElements(mode: 0x%X, count: %d, type: 0x%X, indices: %p)", mode, count, type, indices);
+    if (!t_current || count <= 0) return;
+    GlDrawElementsArgs args = {mode, count, type, 0, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indices))};
+    t_current->session.Append(GLF_DrawElements, &args, sizeof(args));
 }
 
 void WINAPI glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, const void* indices, int basevertex) {
     Log("[GL] glDrawElementsBaseVertex(mode: 0x%X, count: %d, type: 0x%X, indices: %p, basevertex: %d)",
         mode, count, type, indices, basevertex);
+    if (!t_current || count <= 0) return;
+    GlDrawElementsInstancedBaseVertexArgs args = {
+        mode, count, type, 0,
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indices)),
+        1, basevertex
+    };
+    t_current->session.Append(GLF_DrawElementsInstancedBaseVertex, &args, sizeof(args));
 }
 
 void WINAPI glDrawRangeElements(unsigned mode, unsigned start, unsigned end, int count, unsigned type, const void* indices) {
     Log("[GL] glDrawRangeElements(mode: 0x%X, start: %u, end: %u, count: %d, type: 0x%X, indices: %p)",
         mode, start, end, count, type, indices);
+    glDrawElements(mode, count, type, indices);
 }
 
 void WINAPI glDrawRangeElementsBaseVertex(unsigned mode, unsigned start, unsigned end, int count, unsigned type, const void* indices, int basevertex) {
     Log("[GL] glDrawRangeElementsBaseVertex(mode: 0x%X, start: %u, end: %u, count: %d, type: 0x%X, indices: %p, basevertex: %d)",
         mode, start, end, count, type, indices, basevertex);
+    glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
 }
 
 void WINAPI glMultiDrawElements(unsigned mode, const int* count, unsigned type, const void* const* indices, int drawcount) {
@@ -1615,14 +1890,21 @@ void WINAPI glPrimitiveRestartIndex(unsigned index) {
 void WINAPI glDrawArraysInstanced(unsigned mode, int first, int count, int instancecount) {
     Log("[GL] glDrawArraysInstanced(mode: 0x%X, first: %d, count: %d, instances: %d)",
         mode, first, count, instancecount);
-    if (instancecount > 0) {
-        glDrawArrays(mode, first, count);
-    }
+    if (!t_current || count <= 0 || instancecount <= 0) return;
+    GlDrawArraysInstancedArgs args = {mode, first, count, instancecount};
+    t_current->session.Append(GLF_DrawArraysInstanced, &args, sizeof(args));
 }
 
 void WINAPI glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void* indices, int instancecount) {
     Log("[GL] glDrawElementsInstanced(mode: 0x%X, count: %d, type: 0x%X, indices: %p, instances: %d)",
         mode, count, type, indices, instancecount);
+    if (!t_current || count <= 0 || instancecount <= 0) return;
+    GlDrawElementsInstancedBaseVertexArgs args = {
+        mode, count, type, 0,
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indices)),
+        instancecount, 0
+    };
+    t_current->session.Append(GLF_DrawElementsInstancedBaseVertex, &args, sizeof(args));
 }
 
 unsigned char WINAPI glIsBuffer(unsigned id) { return id > 0 ? 1 : 0; }
@@ -1733,6 +2015,10 @@ void WINAPI glReadPixels(int x, int y, int width, int height, unsigned format, u
 
 void WINAPI glDrawBuffer(unsigned mode) {
     Log("[GL] glDrawBuffer(mode: 0x%X)", mode);
+    if (t_current) {
+        GlIdArgs args = {mode};
+        t_current->session.Append(GLF_DrawBuffer, &args, sizeof(args));
+    }
 }
 
 void WINAPI glDrawArraysIndirect(unsigned mode, const void* indirect) {
@@ -1751,6 +2037,13 @@ void WINAPI glDrawElementsIndirect(unsigned mode, unsigned type, const void* ind
 void WINAPI glDrawElementsInstancedBaseVertex(unsigned mode, int count, unsigned type, const void* indices, int instancecount, int basevertex) {
     Log("[GL] glDrawElementsInstancedBaseVertex(mode: 0x%X, count: %d, type: 0x%X, inst: %d, base: %d)",
         mode, count, type, instancecount, basevertex);
+    if (!t_current || count <= 0 || instancecount <= 0) return;
+    GlDrawElementsInstancedBaseVertexArgs args = {
+        mode, count, type, 0,
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indices)),
+        instancecount, basevertex
+    };
+    t_current->session.Append(GLF_DrawElementsInstancedBaseVertex, &args, sizeof(args));
 }
 
 void WINAPI glDrawElementsInstancedBaseVertexBaseInstance(unsigned mode, int count, unsigned type, const void* indices,
