@@ -585,6 +585,13 @@ void NetworkSocket::Close() {
     }
 }
 
+void NetworkSocket::Shutdown() {
+    SOCKET s = m_socket;
+    if (s != INVALID_SOCKET) {
+        shutdown(s, SD_BOTH);
+    }
+}
+
 bool NetworkSocket::IsValid() const noexcept {
     return m_socket != INVALID_SOCKET;
 }

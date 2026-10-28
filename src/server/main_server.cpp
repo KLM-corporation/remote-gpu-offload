@@ -92,6 +92,13 @@ static void LogFrameStats(uint32_t session_id, uint64_t raw_bytes, uint64_t sent
               << (compression ? "on" : "off") << ")" << std::defaultfloat << std::endl;
 }
 
+struct SessionDoneGuard {
+    std::shared_ptr<std::atomic<bool>> flag;
+    ~SessionDoneGuard() {
+        if (flag) *flag = true;
+    }
+};
+
 static void HandleClientSession(
     uint32_t session_id,
     std::shared_ptr<NetworkSocket> client_sock,
@@ -100,6 +107,8 @@ static void HandleClientSession(
     int adapter_index,
     std::shared_ptr<std::atomic<bool>> done_flag)
 {
+    SessionDoneGuard done_guard{done_flag};
+
     // A client may legitimately stay idle (minimised window, level loading), so the session
     // must not end on a receive timeout. TCP keepalive detects peers that silently vanished.
     client_sock->SetTimeouts(10000, 0);
@@ -117,7 +126,6 @@ static void HandleClientSession(
             std::cout << "[Server] Client left before sending a handshake." << std::endl;
         }
         client_sock->Close();
-        if (done_flag) *done_flag = true;
         return;
     }
 
@@ -157,7 +165,6 @@ static void HandleClientSession(
                     std::cerr << "[Server] Failed to initialize host GPU device; rejecting D3D session." << std::endl;
                 }
                 client_sock->Close();
-                if (done_flag) *done_flag = true;
                 return;
             }
             {
@@ -198,7 +205,6 @@ static void HandleClientSession(
         std::lock_guard<std::mutex> lock(g_cout_mutex);
         std::cout << "[Server] Session resources cleanly released. Ready for next connection." << std::endl;
     }
-    if (done_flag) *done_flag = true;
 }
 
 class SessionManager {
@@ -223,11 +229,22 @@ public:
         }
     }
 
+    size_t ActiveCount() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        size_t active = 0;
+        for (const auto& s : m_sessions) {
+            if (s.done && !s.done->load()) {
+                active++;
+            }
+        }
+        return active;
+    }
+
     void AbortActiveSockets() {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (auto& s : m_sessions) {
             if (s.socket && s.socket->IsValid()) {
-                s.socket->Close();
+                s.socket->Shutdown();
             }
         }
     }
@@ -243,22 +260,6 @@ public:
                 AbortActiveSockets();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
-        std::vector<std::thread> to_join;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            for (auto& s : m_sessions) {
-                if (s.thread.joinable()) {
-                    to_join.push_back(std::move(s.thread));
-                }
-            }
-            m_sessions.clear();
-        }
-        for (auto& t : to_join) {
-            if (t.joinable()) {
-                t.join();
-            }
         }
     }
 
@@ -357,18 +358,38 @@ int main(int argc, char* argv[]) {
     SessionManager session_mgr;
     std::mutex d3d_mutex;
     uint32_t session_counter = 0;
+    auto last_active_time = std::chrono::steady_clock::now();
+    bool had_sessions = false;
 
     // 6. Main Connection Accept Loop
     while (g_server_running) {
         session_mgr.Prune();
 
-        // Accept with 500ms timeout to periodically evaluate g_server_running
+        // In --single-session mode: allow multiple concurrent contexts from the client (e.g. Minecraft
+        // dummy + bootstrap + main render context), but terminate the accept loop when all sessions
+        // finish and the server remains idle for a grace period.
+        if (single_session && had_sessions) {
+            if (session_mgr.ActiveCount() > 0) {
+                last_active_time = std::chrono::steady_clock::now();
+            } else {
+                auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - last_active_time).count();
+                if (idle_ms >= 1000) {
+                    std::cout << "[Server] All client sessions finished (--single-session); exiting accept loop." << std::endl;
+                    break;
+                }
+            }
+        }
+
+        // Accept with 500ms timeout to periodically evaluate g_server_running and idle conditions
         auto raw_sock = listen_sock.Accept(500);
         if (!raw_sock) {
             continue; // Timeout expired, re-check shutdown condition
         }
 
         session_counter++;
+        had_sessions = true;
+        last_active_time = std::chrono::steady_clock::now();
         std::shared_ptr<NetworkSocket> client_sock = std::move(raw_sock);
 
         {
@@ -389,11 +410,6 @@ int main(int argc, char* argv[]) {
         );
 
         session_mgr.Add(session_counter, client_sock, done_flag, std::move(worker));
-
-        if (single_session) {
-            std::cout << "[Server] --single-session specified: terminating accept loop." << std::endl;
-            break;
-        }
     }
 
     // 7. Clean Shutdown & Resource Deallocation

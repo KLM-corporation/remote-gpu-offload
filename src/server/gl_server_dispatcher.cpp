@@ -73,6 +73,7 @@ GlServerDispatcher::GlServerDispatcher(GlServerDispatcher&&) noexcept = default;
 GlServerDispatcher& GlServerDispatcher::operator=(GlServerDispatcher&&) noexcept = default;
 
 bool GlServerDispatcher::LoadGlApi() {
+    if (m_gl && m_gl->genBuffers) return true;
     if (!m_gl) m_gl = std::make_unique<GlDispatchApi>();
     return LoadGl(m_gl->genBuffers, "glGenBuffers") && LoadGl(m_gl->bindBuffer, "glBindBuffer") &&
            LoadGl(m_gl->bufferData, "glBufferData") && LoadGl(m_gl->createShader, "glCreateShader") &&

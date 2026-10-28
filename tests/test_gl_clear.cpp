@@ -9,10 +9,13 @@
 #include <windows.h>
 #include <GL/gl.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -197,6 +200,84 @@ int main() {
     wglDeleteContext(rc);
     ReleaseDC(hwnd, hdc);
     DestroyWindow(hwnd);
+
+    std::printf("[gl_clear] concurrent sessions test\n");
+    {
+        HWND hwnd_a = CreateWindowA("RgpuGlClearTest", "RGPU GL A", WS_OVERLAPPEDWINDOW, 10, 10, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
+        HWND hwnd_b = CreateWindowA("RgpuGlClearTest", "RGPU GL B", WS_OVERLAPPEDWINDOW, 200, 10, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
+        place(hwnd_a, 160, 120);
+        place(hwnd_b, 120, 90);
+        ShowWindow(hwnd_a, SW_SHOWNOACTIVATE);
+        ShowWindow(hwnd_b, SW_SHOWNOACTIVATE);
+        Pump();
+
+        HDC hdc_a = GetDC(hwnd_a);
+        HDC hdc_b = GetDC(hwnd_b);
+        int fmt_a = ChoosePixelFormat(hdc_a, &pfd);
+        SetPixelFormat(hdc_a, fmt_a, &pfd);
+        int fmt_b = ChoosePixelFormat(hdc_b, &pfd);
+        SetPixelFormat(hdc_b, fmt_b, &pfd);
+
+        HGLRC rc_a = wglCreateContext(hdc_a);
+        HGLRC rc_b = wglCreateContext(hdc_b);
+        Check(rc_a != nullptr && rc_b != nullptr, "concurrent wglCreateContext for two contexts");
+
+        std::atomic<bool> th_a_ok{false}, th_b_ok{false};
+
+        // Thread A acts like the main render thread, holding Context A.
+        // Thread B acts like a background thread or second context, connecting while A is connected.
+        std::thread th_a([&] {
+            if (!wglMakeCurrent(hdc_a, rc_a)) return;
+            const float green[3] = {0.0f, 1.0f, 0.0f};
+            DrawAndCheck(hdc_a, capture_path, 160, 120, green, "concurrent A frame 1 (green)");
+
+            // Wait for thread B to connect and render while context A remains active
+            for (int i = 0; i < 200 && !th_b_ok.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            // Render geometry on context A to verify context isolation and provide non-clear pixels
+            std::remove(capture_path);
+            glViewport(0, 0, 160, 120);
+            glClearColor(0.05f, 0.05f, 0.15f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glBegin(GL_TRIANGLES);
+            glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-0.7f, -0.7f);
+            glColor3f(0.0f, 1.0f, 0.0f); glVertex2f(0.7f, -0.7f);
+            glColor3f(0.0f, 0.0f, 1.0f); glVertex2f(0.0f, 0.7f);
+            glEnd();
+            Check(SwapBuffers(hdc_a) != FALSE, "concurrent A frame 2 (geometry)");
+            Capture cap2;
+            Check(ReadCapture(capture_path, cap2) && cap2.width == 160 && cap2.height == 120, "concurrent A geometry frame captured");
+
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(rc_a);
+            th_a_ok = true;
+        });
+
+        std::thread th_b([&] {
+            // Give thread A a moment to connect first
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (!wglMakeCurrent(hdc_b, rc_b)) return;
+            const float blue[3] = {0.0f, 0.0f, 1.0f};
+            DrawAndCheck(hdc_b, capture_path, 120, 90, blue, "concurrent B frame 1 (blue)");
+            th_b_ok = true;
+
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(rc_b);
+        });
+
+        th_a.join();
+        th_b.join();
+
+        Check(th_a_ok.load(), "concurrent session A completed successfully");
+        Check(th_b_ok.load(), "concurrent session B completed successfully");
+
+        ReleaseDC(hwnd_a, hdc_a);
+        ReleaseDC(hwnd_b, hdc_b);
+        DestroyWindow(hwnd_a);
+        DestroyWindow(hwnd_b);
+    }
 
     std::printf("\n%s\n", g_failures ? "GL CLEAR TEST: FAILED" : "GL CLEAR TEST: PASSED");
     return g_failures ? 1 : 0;

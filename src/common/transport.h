@@ -68,6 +68,7 @@ public:
 
     // --- State & Utility ---
     void Close();
+    void Shutdown();
     bool IsValid() const noexcept;
     SOCKET GetRawSocket() const noexcept;
     SOCKET GetSocket() const noexcept { return GetRawSocket(); }

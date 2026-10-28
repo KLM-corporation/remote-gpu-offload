@@ -78,7 +78,7 @@ uint16_t ServerPort() {
         char line[128] = {};
         std::fgets(line, sizeof(line), f);
         if (std::fgets(line, sizeof(line), f)) {
-            char* e = std::strpbrk(line, "\\r\\n");
+            char* e = std::strpbrk(line, "\r\n");
             if (e) *e = 0;
             const long value = std::strtol(line, nullptr, 10);
             std::fclose(f);
