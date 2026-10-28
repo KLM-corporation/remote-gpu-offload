@@ -163,7 +163,11 @@ bool NetworkSocket::Connect(const char* host, uint16_t port, int timeout_ms) {
 
                 int sel_res = select(0, nullptr, &write_set, &error_set, tv_ptr);
                 if (sel_res > 0) {
-                    if (FD_ISSET(sock, &write_set) && !FD_ISSET(sock, &error_set)) {
+                    // On Windows, the exception set can also be reported for a socket
+                    // completing through an SSH/local forwarding channel. SO_ERROR is
+                    // authoritative; do not reject a writable socket merely because the
+                    // exception set is also marked.
+                    if (FD_ISSET(sock, &write_set)) {
                         int so_error = 0;
                         int opt_len = sizeof(so_error);
                         if (getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &opt_len) == 0 && so_error == 0) {
@@ -192,7 +196,10 @@ bool NetworkSocket::Connect(const char* host, uint16_t port, int timeout_ms) {
         ioctlsocket(sock, FIONBIO, &blocking);
 
         if (success) {
-            ConfigureConnectedSocket(sock, 10000);
+            // SSH local-forward listeners may report writability before the forwarded
+            // channel has completed its remote connect. Keep the socket blocking after
+            // connect, but do not apply a receive timeout until the protocol handshake.
+            ConfigureConnectedSocket(sock, 0);
             connected_sock = sock;
             break;
         } else {

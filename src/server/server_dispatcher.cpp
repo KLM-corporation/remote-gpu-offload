@@ -127,12 +127,18 @@ void ServerDispatcher::ResetSession() {
     m_encodedFrame.clear();
 }
 
-bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket) {
+bool ServerDispatcher::ProcessPacketStream(NetworkSocket& socket, const PacketHeader* first_header,
+                                           const std::vector<uint8_t>* first_payload) {
     PacketHeader header = {};
     std::vector<uint8_t> payload;
+    bool have_first = first_header && first_payload;
 
     while (socket.IsValid()) {
-        if (!socket.RecvPacket(header, payload)) {
+        if (have_first) {
+            header = *first_header;
+            payload = *first_payload;
+            have_first = false;
+        } else if (!socket.RecvPacket(header, payload)) {
             // Peer vanished without OP_SHUTDOWN (process killed, network dropped, keepalive expired)
             return false;
         }

@@ -107,8 +107,10 @@ public:
     ServerDispatcher(const ServerDispatcher&) = delete;
     ServerDispatcher& operator=(const ServerDispatcher&) = delete;
 
-    // Main session packet processing loop over socket
-    bool ProcessPacketStream(NetworkSocket& socket);
+    // Main session packet processing loop over socket. When main() already read the first packet
+    // to pick the API, it is passed in and handled before reading from the socket.
+    bool ProcessPacketStream(NetworkSocket& socket, const PacketHeader* first_header = nullptr,
+                             const std::vector<uint8_t>* first_payload = nullptr);
 
     // Single command dispatch (callable directly or from packet stream)
     bool DispatchCommand(const PacketHeader& header, const uint8_t* payload, size_t payload_size, NetworkSocket* socket = nullptr);

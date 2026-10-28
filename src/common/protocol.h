@@ -35,7 +35,8 @@ enum RgpuFlags : uint16_t {
 // client that sets none (older clients) keeps receiving uncompressed frames.
 enum RgpuClientFlags : uint32_t {
     CLIENT_FLAG_NONE              = 0x0000,
-    CLIENT_FLAG_FRAME_COMPRESSION = 0x0001  // Client can decode OP_FRAME_DATA sent with FLAG_COMPRESSED
+    CLIENT_FLAG_FRAME_COMPRESSION = 0x0001, // Client can decode OP_FRAME_DATA sent with FLAG_COMPRESSED
+    CLIENT_FLAG_API_OPENGL        = 0x0002  // Session speaks the OpenGL opcodes (gl_protocol.h), not Direct3D 11
 };
 
 // Shader stages bound through the generic OP_STAGE_SET_* opcodes (VS, PS and CS keep their own).
@@ -136,7 +137,15 @@ enum RgpuOpcode : uint16_t {
     // 5. Presentation & Streaming (0x0070 - 0x007F)
     OP_PRESENT              = 0x0070, // Client -> Server: End-of-frame present & readback trigger
     OP_FRAME_DATA           = 0x0071, // Server -> Client: Return rendered framebuffer pixels
-    OP_RESIZE_BUFFERS       = 0x0072  // Client -> Server: Recreate the host back buffer at a new size
+    OP_RESIZE_BUFFERS       = 0x0072, // Client -> Server: Recreate the host back buffer at a new size
+
+    // OpenGL sessions (CLIENT_FLAG_API_OPENGL); payloads and function ids live in gl_protocol.h.
+    // The handshake and OP_FRAME_DATA are shared with the Direct3D 11 path.
+    OP_GL_CREATE_CONTEXT    = 0x0100, // Client -> Server: Create the host OpenGL context
+    OP_GL_CONTEXT_RESPONSE  = 0x0101, // Server -> Client: Context result and renderer string
+    OP_GL_COMMANDS          = 0x0102, // Client -> Server: Batch of serialized GL calls
+    OP_GL_SWAP              = 0x0103, // Client -> Server: SwapBuffers; answered by OP_FRAME_DATA
+    OP_GL_RESIZE            = 0x0104  // Client -> Server: Resize the host default framebuffer
 };
 
 #pragma pack(push, 1)

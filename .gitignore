@@ -1,4 +1,4 @@
-﻿# Build outputs and temp files
+# Build outputs and temp files
 build/
 bin/
 *.exe
@@ -11,3 +11,6 @@ bin/
 # Python bytecode (created when the test scripts run)
 __pycache__/
 *.pyc
+
+# Test captures
+gl_capture.bmp

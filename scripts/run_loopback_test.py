@@ -28,8 +28,11 @@ import verify_pixels  # noqa: E402
 BUILD_COMMANDS = [
     ["-std=c++17", "-O2", "-Isrc/common", "-Isrc/server",
      "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/server/gpu_device.cpp", "src/server/server_dispatcher.cpp",
-     "src/server/main_server.cpp", "-o", "{build}/server.exe",
-     "-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler"],
+     "src/server/gl_host_device.cpp", "src/server/gl_server_dispatcher.cpp", "src/server/main_server.cpp", "-o", "{build}/server.exe",
+     "-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler", "-lopengl32", "-lgdi32"],
+    ["-shared", "-static", "-std=c++17", "-O2", "-Isrc/common", "-Isrc/client", "src/common/transport.cpp",
+     "src/common/frame_codec.cpp", "src/client/presentation.cpp", "src/client/gl_session.cpp", "src/client/gl_wrapper.cpp",
+     "src/client/opengl32.def", "-o", "{build}/client/opengl32.dll", "-lws2_32", "-lgdi32", "-lopengl32"],
     ["-shared", "-static", "-std=c++17", "-O2", "-Isrc/common", "-Isrc/client",
      "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/client/presentation.cpp", "src/client/proxy_device.cpp",
      "src/client/proxy_context.cpp", "src/client/proxy_swapchain.cpp", "src/client/proxy_dxgi.cpp",
@@ -40,6 +43,11 @@ BUILD_COMMANDS = [
      "-o", "{build}/client/dxgi.dll"],
     ["-std=c++17", "-O2", "-static", "-Isrc/sample_app", "src/sample_app/main_sample.cpp",
      "-o", "{build}/client/sample_cube.exe", "-ld3d11", "-ld3dcompiler", "-luser32", "-ldxguid"],
+    ["-std=c++17", "-O2", "-static", "tests/test_gl_clear.cpp", "-o", "{build}/client/test_gl_clear.exe",
+     "-lopengl32", "-lgdi32", "-luser32"],
+    ["-std=c++17", "-O2", "-static", "-Isrc/common", "-Isrc/server", "tests/test_gl_server.cpp",
+     "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/server/gl_host_device.cpp",
+     "src/server/gl_server_dispatcher.cpp", "-o", "{build}/test_gl_server.exe", "-lws2_32", "-lopengl32", "-lgdi32"],
 ]
 
 
@@ -122,6 +130,8 @@ def main(argv=None):
     client_dir = build_dir / "client"
     proxy_dll = client_dir / "d3d11.dll"
     sample_exe = client_dir / "sample_cube.exe"
+    gl_test_exe = client_dir / "test_gl_clear.exe"
+    gl_server_test_exe = build_dir / "test_gl_server.exe"
     capture = artifacts / "last_frame.bmp"
     server_log = artifacts / "server.log"
     client_log = artifacts / "client.log"
@@ -135,7 +145,7 @@ def main(argv=None):
 
     r = Results()
     print("[runner] preflight")
-    for path in (server_exe, proxy_dll, sample_exe):
+    for path in (server_exe, proxy_dll, sample_exe, gl_test_exe):
         if not r.check(path.exists(), f"{path.relative_to(build_dir)} exists"):
             print("[runner] FAILED: missing binaries (run with --build)")
             return 1
@@ -188,12 +198,50 @@ def main(argv=None):
             frames.group(0) if frames else "no frame count in server log")
     r.check("Status: Normal" in log, "session ended normally on the server")
 
-    print("[runner] verifying captured frame")
-    r.check(capture.exists(), "frame captured", str(capture))
-    if capture.exists():
-        rc = verify_pixels.main([str(capture), "--png", str(artifacts / "last_frame.png"),
-                                 "--json", str(artifacts / "pixel_metrics.json")])
-        r.check(rc == 0, "pixel verification")
+    print("[runner] running OpenGL protocol tests")
+    gl_server_test = subprocess.run([str(gl_server_test_exe), str(args.port + 100)],
+                                    cwd=build_dir, capture_output=True, text=True, timeout=args.timeout)
+    print("    " + "\n    ".join((gl_server_test.stdout + gl_server_test.stderr).strip().splitlines()))
+    r.check(gl_server_test.returncode == 0, "OpenGL server protocol tests", f"code {gl_server_test.returncode}")
+
+    print("[runner] running OpenGL clear E2E test")
+    gl_log = artifacts / "gl_server.log"
+    gl_capture = artifacts / "gl_capture.bmp"
+    gl_server, gl_listening, gl_pump = start_server(server_exe, args.port + 200, gl_log)
+    try:
+        ready = gl_listening.wait(60) and gl_server.poll() is None
+        r.check(ready, "OpenGL server listening")
+        if ready:
+            gl_env = dict(os.environ, RGPU_SERVER="127.0.0.1", RGPU_PORT=str(args.port + 200),
+                          RGPU_CAPTURE_FILE=str(gl_capture))
+            gl_client = subprocess.run([str(gl_test_exe)], cwd=client_dir, env=gl_env,
+                                       capture_output=True, text=True, timeout=args.timeout)
+            print("    " + "\n    ".join((gl_client.stdout + gl_client.stderr).strip().splitlines()))
+            r.check(gl_client.returncode == 0, "OpenGL clear E2E test", f"code {gl_client.returncode}")
+        try:
+            gl_server.wait(15)
+        except subprocess.TimeoutExpired:
+            pass
+        r.check(gl_server.poll() is not None and gl_server.returncode == 0,
+                "OpenGL server exited cleanly", f"code {gl_server.poll()}")
+    finally:
+        stop(gl_server)
+        gl_pump.join(5)
+
+    print("[runner] verifying captured frames")
+    if gl_capture.exists():
+        rc = verify_pixels.main([str(gl_capture), "--png", str(artifacts / "gl_capture.png"),
+                                 "--json", str(artifacts / "gl_pixel_metrics.json")])
+        r.check(rc == 0, "OpenGL pixel verification")
+    else:
+        r.check(False, "OpenGL frame captured", str(gl_capture))
+    # The D3D capture is only meaningful when the D3D sample completed successfully.
+    if client_log.exists() and "Presented" in client_log.read_text(encoding="utf-8", errors="replace"):
+        r.check(capture.exists(), "D3D frame captured", str(capture))
+        if capture.exists():
+            rc = verify_pixels.main([str(capture), "--png", str(artifacts / "last_frame.png"),
+                                     "--json", str(artifacts / "pixel_metrics.json")])
+            r.check(rc == 0, "D3D pixel verification")
 
     print("=" * 60)
     print(f" RESULT: {'PASSED' if r.passed else 'FAILED'}  (artifacts: {artifacts})")

@@ -22,6 +22,7 @@
 #include "transport.h"
 #include "gpu_device.h"
 #include "server_dispatcher.h"
+#include "gl_server_dispatcher.h"
 
 using namespace RemoteGPU;
 
@@ -137,26 +138,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 4. Initialize Host GPU Hardware Device
+    // GPU initialization is deferred until the first non-OpenGL session. OpenGL uses its own
+    // WGL host device and must remain usable on machines without a D3D11 adapter.
     HostGpuDevice gpu;
-    std::cout << "[Server] Enumerating DXGI adapters and initializing dedicated GPU..." << std::endl;
-    if (!gpu.InitializeDedicatedGpu(adapter_index)) {
-        std::cerr << "[Server] FATAL: Failed to initialize host GPU device!" << std::endl;
-        NetworkSocket::ShutdownNetwork();
-        return 1;
-    }
 
-    // Log active hardware device details
-    std::cout << "[Server] ---------------------------------------------------" << std::endl;
-    std::cout << "[Server] Active GPU Adapter : " << gpu.GetAdapterDescription() << std::endl;
-    std::cout << "[Server] Vendor ID / Device : 0x" << std::hex << gpu.GetVendorId() 
-              << " / 0x" << gpu.GetDeviceId() << std::dec << std::endl;
-    std::cout << "[Server] Dedicated VRAM     : " << (gpu.GetDedicatedVram() / (1024 * 1024)) << " MB" << std::endl;
-    std::cout << "[Server] Shared System RAM  : " << (gpu.GetSharedRam() / (1024 * 1024)) << " MB" << std::endl;
-    std::cout << "[Server] Direct3D 11 Level  : 0x" << std::hex << gpu.GetFeatureLevel() << std::dec << std::endl;
-    std::cout << "[Server] ---------------------------------------------------" << std::endl;
-
-    // 5. Bind and Listen on Network Socket
+    // Bind and listen before initializing an API-specific device so the daemon can accept either
+    // protocol without paying for (or requiring) the other graphics stack.
     NetworkSocket listen_sock;
     if (!listen_sock.BindAndListen(port, bind_ip.c_str())) {
         std::cerr << "[Server] FATAL: Failed to bind and listen on " << bind_ip << ":" << port << std::endl;
@@ -189,27 +176,74 @@ int main(int argc, char* argv[]) {
             std::cerr << "[Server] Warning: TCP keepalive could not be enabled for this session." << std::endl;
         }
 
-        // Instantiate ServerDispatcher for this client session
-        ServerDispatcher dispatcher(gpu);
+        // The first packet is the handshake; its flags say which graphics API the client speaks.
+        PacketHeader first = {};
+        std::vector<uint8_t> first_payload;
+        if (!client_sock->RecvPacket(first, first_payload)) {
+            std::cout << "[Server] Client left before sending a handshake." << std::endl;
+            client_sock->Close();
+            if (single_session) break;
+            continue;
+        }
+        const bool is_opengl = first.opcode == OP_HANDSHAKE_REQUEST &&
+                               first_payload.size() >= sizeof(HandshakeRequestPayload) &&
+                               (reinterpret_cast<const HandshakeRequestPayload*>(first_payload.data())->client_flags &
+                                CLIENT_FLAG_API_OPENGL) != 0;
 
-        std::cout << "[Server] Session #" << session_counter << " started. Processing command stream..." << std::endl;
-        bool session_ok = dispatcher.ProcessPacketStream(*client_sock);
-
-        std::cout << "[Server] Session #" << session_counter << " finished (Status: " 
-                  << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
-        std::cout << "[Server] Total commands executed: " << dispatcher.GetTotalCommandsProcessed()
-                  << ", Total frames presented: " << dispatcher.GetTotalFramesPresented() << std::endl;
-        if (dispatcher.GetRawFrameBytes() > 0) {
-            const double raw_mb = dispatcher.GetRawFrameBytes() / (1024.0 * 1024.0);
-            const double sent_mb = dispatcher.GetSentFrameBytes() / (1024.0 * 1024.0);
+        auto report_frames = [](uint64_t raw_bytes, uint64_t sent_bytes, bool compression) {
+            if (raw_bytes == 0) return;
+            const double raw_mb = raw_bytes / (1024.0 * 1024.0);
+            const double sent_mb = sent_bytes / (1024.0 * 1024.0);
             std::cout << "[Server] Frame stream: " << std::fixed << std::setprecision(2) << raw_mb << " MB rendered, "
                       << sent_mb << " MB sent (" << std::setprecision(1) << (100.0 * sent_mb / raw_mb) << "%, compression "
-                      << (dispatcher.IsFrameCompressionEnabled() ? "on" : "off") << ")" << std::defaultfloat << std::endl;
-        }
+                      << (compression ? "on" : "off") << ")" << std::defaultfloat << std::endl;
+        };
 
-        // Clean disconnect handling: Close client socket & reset session state
-        client_sock->Close();
-        dispatcher.ResetSession();
+        if (is_opengl) {
+            GlServerDispatcher gl_dispatcher;
+            std::cout << "[Server] Session #" << session_counter << " started (OpenGL). Processing command stream..." << std::endl;
+            const bool session_ok = gl_dispatcher.ProcessPacketStream(*client_sock, first, first_payload);
+            std::cout << "[Server] Session #" << session_counter << " finished (Status: "
+                      << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
+            std::cout << "[Server] Total commands executed: " << gl_dispatcher.GetTotalCommandsProcessed()
+                      << ", Total frames presented: " << gl_dispatcher.GetTotalFramesPresented() << std::endl;
+            report_frames(gl_dispatcher.GetRawFrameBytes(), gl_dispatcher.GetSentFrameBytes(),
+                          gl_dispatcher.IsFrameCompressionEnabled());
+            client_sock->Close();
+        } else {
+            // Initialize the D3D device only when a D3D client actually connects.
+            if (!gpu.GetDevice()) {
+                std::cout << "[Server] Enumerating DXGI adapters and initializing dedicated GPU..." << std::endl;
+                if (!gpu.InitializeDedicatedGpu(adapter_index)) {
+                    std::cerr << "[Server] Failed to initialize host GPU device; rejecting D3D session." << std::endl;
+                    client_sock->Close();
+                    if (single_session) break;
+                    continue;
+                }
+                std::cout << "[Server] Active GPU Adapter : " << gpu.GetAdapterDescription() << std::endl;
+                std::cout << "[Server] Vendor ID / Device : 0x" << std::hex << gpu.GetVendorId()
+                          << " / 0x" << gpu.GetDeviceId() << std::dec << std::endl;
+                std::cout << "[Server] Dedicated VRAM     : " << (gpu.GetDedicatedVram() / (1024 * 1024)) << " MB" << std::endl;
+                std::cout << "[Server] Shared System RAM  : " << (gpu.GetSharedRam() / (1024 * 1024)) << " MB" << std::endl;
+                std::cout << "[Server] Direct3D 11 Level  : 0x" << std::hex << gpu.GetFeatureLevel() << std::dec << std::endl;
+            }
+
+            ServerDispatcher dispatcher(gpu);
+
+            std::cout << "[Server] Session #" << session_counter << " started. Processing command stream..." << std::endl;
+            bool session_ok = dispatcher.ProcessPacketStream(*client_sock, &first, &first_payload);
+
+            std::cout << "[Server] Session #" << session_counter << " finished (Status: "
+                      << (session_ok ? "Normal" : "Disconnected/Aborted") << ")." << std::endl;
+            std::cout << "[Server] Total commands executed: " << dispatcher.GetTotalCommandsProcessed()
+                      << ", Total frames presented: " << dispatcher.GetTotalFramesPresented() << std::endl;
+            report_frames(dispatcher.GetRawFrameBytes(), dispatcher.GetSentFrameBytes(),
+                          dispatcher.IsFrameCompressionEnabled());
+
+            // Clean disconnect handling: Close client socket & reset session state
+            client_sock->Close();
+            dispatcher.ResetSession();
+        }
 
         std::cout << "[Server] Session resources cleanly released. Ready for next connection." << std::endl;
 
