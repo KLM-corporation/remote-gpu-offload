@@ -39,6 +39,7 @@ constexpr uint32_t kClearMaskAll = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | G
 constexpr int32_t  kMaxViewportDim = 32768;
 constexpr GLenum kArrayBuffer = 0x8892;
 constexpr GLenum kElementArrayBuffer = 0x8893;
+constexpr GLenum kUniformBuffer = 0x8A11;
 
 template <typename T> bool LoadGl(T& fn, const char* name) {
     fn = reinterpret_cast<T>(reinterpret_cast<void*>(wglGetProcAddress(name)));
@@ -257,8 +258,9 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_BindBuffer: {
                 if (cmd.size != sizeof(GlBindBufferArgs)) return false;
                 const auto a = ReadArgs<GlBindBufferArgs>(args);
-                if (a.target != kArrayBuffer && a.target != kElementArrayBuffer) return false;
+                if (a.target != kArrayBuffer && a.target != kElementArrayBuffer && a.target != kUniformBuffer) return false;
                 if (a.id != 0 && !m_buffers.count(a.id)) return false;
+                m_boundBuffers[a.target] = a.id;
                 if (a.target == kArrayBuffer) m_boundArrayBuffer = a.id;
                 m_gl->bindBuffer(a.target, a.id ? m_buffers[a.id].gl_id : 0);
                 break;
@@ -266,13 +268,18 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_BufferData: {
                 if (cmd.size < sizeof(GlBufferDataArgs)) return false;
                 const auto a = ReadArgs<GlBufferDataArgs>(args);
-                if (a.target != kArrayBuffer || a.size > 64 * 1024 * 1024 ||
-                    a.size != cmd.size - sizeof(a) || m_boundArrayBuffer == 0) return false;
-                auto& buffer = m_buffers[m_boundArrayBuffer];
+                if ((a.target != kArrayBuffer && a.target != kElementArrayBuffer && a.target != kUniformBuffer) ||
+                    a.size > 64 * 1024 * 1024 || a.size != cmd.size - sizeof(a)) return false;
+                auto itBound = m_boundBuffers.find(a.target);
+                if (itBound == m_boundBuffers.end() || itBound->second == 0) return false;
+                auto itBuf = m_buffers.find(itBound->second);
+                if (itBuf == m_buffers.end()) return false;
+                auto& buffer = itBuf->second;
                 buffer.target = a.target;
                 buffer.data.assign(args + sizeof(a), args + cmd.size);
                 m_gl->bindBuffer(a.target, buffer.gl_id);
-                m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(a.size), buffer.data.data(), a.usage);
+                m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(a.size),
+                                 buffer.data.empty() ? nullptr : buffer.data.data(), a.usage);
                 break;
             }
             case GLF_DeleteBuffer: {
@@ -280,6 +287,11 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 const auto a = ReadArgs<GlIdArgs>(args);
                 m_buffers.erase(a.id);
                 if (m_boundArrayBuffer == a.id) m_boundArrayBuffer = 0;
+                for (auto& pair : m_boundBuffers) {
+                    if (pair.second == a.id) {
+                        pair.second = 0;
+                    }
+                }
                 break;
             }
             case GLF_CreateShader: {

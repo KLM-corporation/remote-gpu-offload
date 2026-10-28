@@ -151,6 +151,163 @@ int main() {
     Check(rc != nullptr, "wglCreateContext");
     Check(rc && wglMakeCurrent(hdc, rc), "wglMakeCurrent connects to the server");
     Check(rc && wglGetCurrentContext() == rc && wglGetCurrentDC() == hdc, "current context and DC are reported");
+
+    int ubo_align = 0;
+    glGetIntegerv(0x8A34, &ubo_align);
+    Check(ubo_align == 256, "GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT is 256");
+
+    float max_aniso = 0.0f;
+    glGetFloatv(0x84FF, &max_aniso);
+    Check(max_aniso == 16.0f, "GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT is 16.0f");
+
+    using TexImage2DFn = void(WINAPI*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void*);
+    using GetTexLevelParameterivFn = void(WINAPI*)(unsigned, int, unsigned, int*);
+    auto pfnTexImage2D = reinterpret_cast<TexImage2DFn>(reinterpret_cast<void*>(wglGetProcAddress("glTexImage2D")));
+    auto pfnGetTexLevelParameteriv = reinterpret_cast<GetTexLevelParameterivFn>(reinterpret_cast<void*>(wglGetProcAddress("glGetTexLevelParameteriv")));
+    if (pfnTexImage2D && pfnGetTexLevelParameteriv) {
+        int w = -1;
+        pfnTexImage2D(0x8064 /*GL_PROXY_TEXTURE_2D*/, 0, 6408, 32768, 32768, 0, 6408, 0x1401, nullptr);
+        pfnGetTexLevelParameteriv(0x8064, 0, 0x1000 /*GL_TEXTURE_WIDTH*/, &w);
+        Check(w == 0, "proxy texture 32768 returns 0");
+
+        pfnTexImage2D(0x8064 /*GL_PROXY_TEXTURE_2D*/, 0, 6408, 16384, 16384, 0, 6408, 0x1401, nullptr);
+        pfnGetTexLevelParameteriv(0x8064, 0, 0x1000 /*GL_TEXTURE_WIDTH*/, &w);
+        Check(w == 16384, "proxy texture 16384 returns 16384");
+    } else {
+        Check(false, "proxy texture functions available");
+    }
+
+    using GenSamplersFn = void(WINAPI*)(int, unsigned*);
+    using SamplerParameteriFn = void(WINAPI*)(unsigned, unsigned, int);
+    using SamplerParameterfFn = void(WINAPI*)(unsigned, unsigned, float);
+    using BindSamplerFn = void(WINAPI*)(unsigned, unsigned);
+    using DeleteSamplersFn = void(WINAPI*)(int, const unsigned*);
+    auto pfnGenSamplers = reinterpret_cast<GenSamplersFn>(reinterpret_cast<void*>(wglGetProcAddress("glGenSamplers")));
+    auto pfnSamplerParameteri = reinterpret_cast<SamplerParameteriFn>(reinterpret_cast<void*>(wglGetProcAddress("glSamplerParameteri")));
+    auto pfnSamplerParameterf = reinterpret_cast<SamplerParameterfFn>(reinterpret_cast<void*>(wglGetProcAddress("glSamplerParameterf")));
+    auto pfnBindSampler = reinterpret_cast<BindSamplerFn>(reinterpret_cast<void*>(wglGetProcAddress("glBindSampler")));
+    auto pfnDeleteSamplers = reinterpret_cast<DeleteSamplersFn>(reinterpret_cast<void*>(wglGetProcAddress("glDeleteSamplers")));
+    Check(pfnGenSamplers && pfnSamplerParameteri && pfnSamplerParameterf && pfnBindSampler && pfnDeleteSamplers, "sampler functions available");
+    if (pfnGenSamplers && pfnSamplerParameteri && pfnSamplerParameterf && pfnBindSampler && pfnDeleteSamplers) {
+        unsigned samplers[32] = {};
+        pfnGenSamplers(32, samplers);
+        Check(samplers[0] != 0 && samplers[31] != 0, "glGenSamplers generated valid IDs");
+        pfnSamplerParameteri(samplers[0], 0x2800 /*GL_TEXTURE_MAG_FILTER*/, 0x2601 /*GL_LINEAR*/);
+        pfnSamplerParameterf(samplers[0], 0x84FE /*GL_TEXTURE_MAX_ANISOTROPY_EXT*/, 16.0f);
+        pfnBindSampler(0, samplers[0]);
+        pfnDeleteSamplers(32, samplers);
+        Check(true, "sampler operations executed without crash");
+    }
+
+    // Test newly added OpenGL entry points
+    using TexSubImage2DFn = void(WINAPI*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void*);
+    auto pfnTexSubImage2D = reinterpret_cast<TexSubImage2DFn>(reinterpret_cast<void*>(wglGetProcAddress("glTexSubImage2D")));
+    Check(pfnTexSubImage2D != nullptr, "glTexSubImage2D available via wglGetProcAddress");
+    if (pfnTexSubImage2D) {
+        uint32_t pixels[16 * 16] = {};
+        pfnTexSubImage2D(0x0DE1 /*GL_TEXTURE_2D*/, 0, 0, 0, 16, 16, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, pixels);
+        Check(true, "glTexSubImage2D called successfully");
+    }
+
+    using FenceSyncFn = void*(WINAPI*)(unsigned, unsigned);
+    using ClientWaitSyncFn = unsigned(WINAPI*)(void*, unsigned, unsigned long long);
+    using DeleteSyncFn = void(WINAPI*)(void*);
+    auto pfnFenceSync = reinterpret_cast<FenceSyncFn>(reinterpret_cast<void*>(wglGetProcAddress("glFenceSync")));
+    auto pfnClientWaitSync = reinterpret_cast<ClientWaitSyncFn>(reinterpret_cast<void*>(wglGetProcAddress("glClientWaitSync")));
+    auto pfnDeleteSync = reinterpret_cast<DeleteSyncFn>(reinterpret_cast<void*>(wglGetProcAddress("glDeleteSync")));
+    Check(pfnFenceSync && pfnClientWaitSync && pfnDeleteSync, "sync functions available via wglGetProcAddress");
+    if (pfnFenceSync && pfnClientWaitSync && pfnDeleteSync) {
+        void* sync = pfnFenceSync(0x9117 /*GL_SYNC_GPU_COMMANDS_COMPLETE*/, 0);
+        Check(sync != nullptr, "glFenceSync returned non-null sync handle");
+        unsigned waitResult = pfnClientWaitSync(sync, 0, 1000000ULL);
+        Check(waitResult == 0x911A /*GL_ALREADY_SIGNALED*/, "glClientWaitSync returned GL_ALREADY_SIGNALED");
+        pfnDeleteSync(sync);
+    }
+
+    using MapBufferRangeFn = void*(WINAPI*)(unsigned, ptrdiff_t, ptrdiff_t, unsigned);
+    using UnmapBufferFn = unsigned char(WINAPI*)(unsigned);
+    using BufferSubDataFn = void(WINAPI*)(unsigned, ptrdiff_t, ptrdiff_t, const void*);
+    using GenBuffersFn = void(WINAPI*)(int, unsigned*);
+    using BindBufferFn = void(WINAPI*)(unsigned, unsigned);
+    using BufferDataFn = void(WINAPI*)(unsigned, ptrdiff_t, const void*, unsigned);
+    auto pfnMapBufferRange = reinterpret_cast<MapBufferRangeFn>(reinterpret_cast<void*>(wglGetProcAddress("glMapBufferRange")));
+    auto pfnUnmapBuffer = reinterpret_cast<UnmapBufferFn>(reinterpret_cast<void*>(wglGetProcAddress("glUnmapBuffer")));
+    auto pfnBufferSubData = reinterpret_cast<BufferSubDataFn>(reinterpret_cast<void*>(wglGetProcAddress("glBufferSubData")));
+    auto pfnGenBuffers = reinterpret_cast<GenBuffersFn>(reinterpret_cast<void*>(wglGetProcAddress("glGenBuffers")));
+    auto pfnBindBuffer = reinterpret_cast<BindBufferFn>(reinterpret_cast<void*>(wglGetProcAddress("glBindBuffer")));
+    auto pfnBufferData = reinterpret_cast<BufferDataFn>(reinterpret_cast<void*>(wglGetProcAddress("glBufferData")));
+    Check(pfnMapBufferRange && pfnUnmapBuffer && pfnBufferSubData && pfnGenBuffers && pfnBindBuffer && pfnBufferData, "buffer mapping and subdata functions available");
+    if (pfnMapBufferRange && pfnUnmapBuffer && pfnBufferSubData && pfnGenBuffers && pfnBindBuffer && pfnBufferData) {
+        unsigned buf = 0;
+        pfnGenBuffers(1, &buf);
+        pfnBindBuffer(0x8892 /*GL_ARRAY_BUFFER*/, buf);
+        float initData[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        pfnBufferData(0x8892 /*GL_ARRAY_BUFFER*/, sizeof(initData), initData, 0x88E4 /*GL_STATIC_DRAW*/);
+        void* mapped = pfnMapBufferRange(0x8892 /*GL_ARRAY_BUFFER*/, 0, sizeof(initData), 0x0002 /*GL_MAP_WRITE_BIT*/);
+        Check(mapped != nullptr, "glMapBufferRange returned valid pointer");
+        if (mapped) {
+            float* mptr = reinterpret_cast<float*>(mapped);
+            mptr[0] = 5.0f;
+            mptr[1] = 6.0f;
+        }
+        unsigned char unmapOk = pfnUnmapBuffer(0x8892 /*GL_ARRAY_BUFFER*/);
+        Check(unmapOk == 1, "glUnmapBuffer returned GL_TRUE");
+        float subData[2] = {7.0f, 8.0f};
+        pfnBufferSubData(0x8892 /*GL_ARRAY_BUFFER*/, 0, sizeof(subData), subData);
+        Check(true, "glBufferSubData executed without crash");
+    }
+
+    using GetUniformBlockIndexFn = unsigned(WINAPI*)(unsigned, const char*);
+    using UniformBlockBindingFn = void(WINAPI*)(unsigned, unsigned, unsigned);
+    auto pfnGetUniformBlockIndex = reinterpret_cast<GetUniformBlockIndexFn>(reinterpret_cast<void*>(wglGetProcAddress("glGetUniformBlockIndex")));
+    auto pfnUniformBlockBinding = reinterpret_cast<UniformBlockBindingFn>(reinterpret_cast<void*>(wglGetProcAddress("glUniformBlockBinding")));
+    Check(pfnGetUniformBlockIndex && pfnUniformBlockBinding, "uniform block functions available");
+    if (pfnGetUniformBlockIndex && pfnUniformBlockBinding) {
+        unsigned idx1 = pfnGetUniformBlockIndex(1, "TestBlock");
+        unsigned idx2 = pfnGetUniformBlockIndex(1, "TestBlock");
+        Check(idx1 == idx2, "glGetUniformBlockIndex returned consistent index");
+        pfnUniformBlockBinding(1, idx1, 0);
+    }
+
+    using FrontFaceFn = void(WINAPI*)(unsigned);
+    using LineWidthFn = void(WINAPI*)(float);
+    using StencilFuncFn = void(WINAPI*)(unsigned, int, unsigned);
+    using Uniform2iFn = void(WINAPI*)(int, int, int);
+    using GetActiveUniformBlockivFn = void(WINAPI*)(unsigned, unsigned, unsigned, int*);
+    using ProvokingVertexFn = void(WINAPI*)(unsigned);
+    using ClearBufferivFn = void(WINAPI*)(unsigned, int, const int*);
+    using GetBufferPointervFn = void(WINAPI*)(unsigned, unsigned, void**);
+    using GetSyncivFn = void(WINAPI*)(void*, unsigned, int, int*, int*);
+
+    auto pfnFrontFace = reinterpret_cast<FrontFaceFn>(reinterpret_cast<void*>(wglGetProcAddress("glFrontFace")));
+    auto pfnLineWidth = reinterpret_cast<LineWidthFn>(reinterpret_cast<void*>(wglGetProcAddress("glLineWidth")));
+    auto pfnStencilFunc = reinterpret_cast<StencilFuncFn>(reinterpret_cast<void*>(wglGetProcAddress("glStencilFunc")));
+    auto pfnUniform2i = reinterpret_cast<Uniform2iFn>(reinterpret_cast<void*>(wglGetProcAddress("glUniform2i")));
+    auto pfnGetActiveUniformBlockiv = reinterpret_cast<GetActiveUniformBlockivFn>(reinterpret_cast<void*>(wglGetProcAddress("glGetActiveUniformBlockiv")));
+    auto pfnProvokingVertex = reinterpret_cast<ProvokingVertexFn>(reinterpret_cast<void*>(wglGetProcAddress("glProvokingVertex")));
+    auto pfnClearBufferiv = reinterpret_cast<ClearBufferivFn>(reinterpret_cast<void*>(wglGetProcAddress("glClearBufferiv")));
+    auto pfnGetBufferPointerv = reinterpret_cast<GetBufferPointervFn>(reinterpret_cast<void*>(wglGetProcAddress("glGetBufferPointerv")));
+    auto pfnGetSynciv = reinterpret_cast<GetSyncivFn>(reinterpret_cast<void*>(wglGetProcAddress("glGetSynciv")));
+
+    Check(pfnFrontFace && pfnLineWidth && pfnStencilFunc && pfnUniform2i && pfnGetActiveUniformBlockiv &&
+          pfnProvokingVertex && pfnClearBufferiv && pfnGetBufferPointerv && pfnGetSynciv,
+          "extended core GL functions available via wglGetProcAddress");
+    if (pfnFrontFace && pfnLineWidth && pfnStencilFunc && pfnUniform2i && pfnGetActiveUniformBlockiv &&
+        pfnProvokingVertex && pfnClearBufferiv && pfnGetBufferPointerv && pfnGetSynciv) {
+        pfnFrontFace(0x0900 /*GL_CW*/);
+        pfnLineWidth(1.5f);
+        pfnStencilFunc(0x0202 /*GL_EQUAL*/, 1, 0xFF);
+        pfnUniform2i(0, 10, 20);
+        int blockSize = 0;
+        pfnGetActiveUniformBlockiv(1, 0, 0x8A40 /*GL_UNIFORM_BLOCK_DATA_SIZE*/, &blockSize);
+        Check(blockSize == 1024, "glGetActiveUniformBlockiv returned data size 1024");
+        pfnProvokingVertex(0x8E4E /*GL_FIRST_VERTEX_CONVENTION*/);
+        int stencilVal = 0;
+        pfnClearBufferiv(0x1802 /*GL_STENCIL*/, 0, &stencilVal);
+        void* ptr = nullptr;
+        pfnGetBufferPointerv(0x8892 /*GL_ARRAY_BUFFER*/, 0x888E /*GL_BUFFER_MAP_POINTER*/, &ptr);
+        Check(true, "extended core GL operations executed cleanly");
+    }
     if (g_failures) return 1;
 
     const float red[3] = {1.0f, 0.0f, 0.0f};

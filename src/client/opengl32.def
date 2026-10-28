@@ -26,6 +26,8 @@ EXPORTS
     glGenBuffers
     glBindBuffer
     glBufferData
+    glBufferSubData
+    glGetBufferSubData
     glDeleteBuffers
     glCreateShader
     glCreateProgram
@@ -35,6 +37,11 @@ EXPORTS
     glLinkProgram
     glUseProgram
     glDrawArrays
+    glDrawElements
+    glDrawElementsBaseVertex
+    glDrawRangeElements
+    glDrawArraysInstanced
+    glDrawElementsInstanced
     glGetString
     glGetStringi
     glGetIntegerv
@@ -45,6 +52,7 @@ EXPORTS
     glGetTexLevelParameteriv
     glPixelStorei
     glGetIntegeri_v
+    glGetBufferParameteriv
     glGetBufferParameteri64v
     glGetVertexAttribiv
     glGetUniformiv
@@ -55,6 +63,12 @@ EXPORTS
     glFramebufferRenderbuffer
     glGenFramebuffers
     glDeleteFramebuffers
+    glGenRenderbuffers
+    glDeleteRenderbuffers
+    glRenderbufferStorage
+    glRenderbufferStorageMultisample
+    glBlitFramebuffer
+    glDrawBuffers
     glGetBooleanv
     glGetError
     glGetAttachedShaders
@@ -69,12 +83,27 @@ EXPORTS
     glBindTexture
     glDeleteTextures
     glTexParameteri
+    glTexParameterf
+    glTexParameteriv
+    glTexParameterfv
+    glGetTexParameteriv
+    glGetTexParameterfv
+    glTexImage1D
     glTexImage2D
+    glTexImage3D
+    glTexSubImage1D
+    glTexSubImage2D
+    glTexSubImage3D
+    glCopyTexSubImage2D
+    glGenerateMipmap
     glActiveTexture
+    glClientActiveTexture
     glGenVertexArrays
     glBindVertexArray
     glDeleteVertexArrays
     glVertexAttribPointer
+    glVertexAttribIPointer
+    glVertexAttribDivisor
     glEnableVertexAttribArray
     glDisableVertexAttribArray
     glGetUniformLocation
@@ -85,6 +114,187 @@ EXPORTS
     glGetProgramInfoLog
     glCheckFramebufferStatus
     glBlendFunc
+    glBlendFuncSeparate
+    glBlendEquation
+    glBlendEquationSeparate
     glDepthFunc
     glDepthMask
+    glDepthRange
+    glDepthRangef
     glCullFace
+    glScissor
+    glColorMask
+    glColorMaski
+    glClearDepth
+    glClearDepthf
+    glClearStencil
+    glPolygonMode
+    glPolygonOffset
+    glUniform1i
+    glUniform1iv
+    glUniform1f
+    glUniform1fv
+    glUniform2f
+    glUniform2fv
+    glUniform3f
+    glUniform3fv
+    glUniform4f
+    glUniform4fv
+    glUniformMatrix2fv
+    glUniformMatrix3fv
+    glUniformMatrix4fv
+    glBindBufferRange
+    glBindBufferBase
+    glUniformBlockBinding
+    glGetUniformBlockIndex
+    glFenceSync
+    glClientWaitSync
+    glWaitSync
+    glDeleteSync
+    glMapBuffer
+    glMapBufferRange
+    glUnmapBuffer
+    glFlushMappedBufferRange
+    glGenSamplers
+    glDeleteSamplers
+    glIsSampler
+    glBindSampler
+    glSamplerParameteri
+    glSamplerParameterf
+    glSamplerParameteriv
+    glSamplerParameterfv
+    glGetSamplerParameteriv
+    glGetSamplerParameterfv
+    glIsBuffer
+    glIsTexture
+    glIsFramebuffer
+    glIsRenderbuffer
+    glIsVertexArray
+    glIsProgram
+    glIsShader
+    glIsSync
+    glBindAttribLocation
+    glDeleteShader
+    glDeleteProgram
+    glBufferStorage
+    glCopyBufferSubData
+    glClearBufferfv
+    glClipControl
+    glDisablei
+    glEnablei
+    glLogicOp
+    glReadBuffer
+    glReadPixels
+    glDrawArraysIndirect
+    glDrawArraysInstancedBaseInstance
+    glDrawElementsIndirect
+    glDrawElementsInstancedBaseVertex
+    glDrawElementsInstancedBaseVertexBaseInstance
+    glMultiDrawArrays
+    glMultiDrawArraysIndirect
+    glMultiDrawElementsBaseVertex
+    glMultiDrawElementsIndirect
+    glGenQueries
+    glDeleteQueries
+    glQueryCounter
+    glGetQueryObjectiv
+    glGetQueryObjectuiv
+    glGetQueryObjecti64v
+    glGetQueryObjectui64v
+    glDebugMessageCallback
+    glDebugMessageCallbackARB
+    glDebugMessageControl
+    glDebugMessageControlARB
+    glObjectLabel
+    glLabelObjectEXT
+    glPushDebugGroup
+    glPopDebugGroup
+    glBindVertexBuffer
+    glVertexAttribBinding
+    glVertexAttribFormat
+    glVertexAttribIFormat
+    glVertexBindingDivisor
+    glTexBuffer
+    glCreateBuffers
+    glNamedBufferData
+    glNamedBufferSubData
+    glNamedBufferStorage
+    glCopyNamedBufferSubData
+    glMapNamedBufferRange
+    glUnmapNamedBuffer
+    glFlushMappedNamedBufferRange
+    glCreateFramebuffers
+    glNamedFramebufferTexture
+    glBlitNamedFramebuffer
+    glDrawBuffer
+    glFramebufferTextureLayer
+    glFramebufferTexture
+    glFramebufferTexture1D
+    glFramebufferTexture3D
+    glGetFramebufferAttachmentParameteriv
+    glGetRenderbufferParameteriv
+    glBindFragDataLocation
+    glGetFragDataLocation
+    glCopyTexImage1D
+    glCopyTexImage2D
+    glCopyTexSubImage1D
+    glCopyTexSubImage3D
+    glPixelStoref
+    glGetTexLevelParameterfv
+    glTexParameterIiv
+    glTexParameterIuiv
+    glGetTexParameterIiv
+    glGetTexParameterIuiv
+    glUniform2i
+    glUniform3i
+    glUniform4i
+    glUniform2iv
+    glUniform3iv
+    glUniform4iv
+    glUniform1ui
+    glUniform2ui
+    glUniform3ui
+    glUniform4ui
+    glUniform1uiv
+    glUniform2uiv
+    glUniform3uiv
+    glUniform4uiv
+    glGetUniformuiv
+    glGetActiveUniformBlockiv
+    glGetActiveUniformBlockName
+    glGetActiveUniformsiv
+    glGetActiveUniformName
+    glGetUniformIndices
+    glFrontFace
+    glLineWidth
+    glPointSize
+    glStencilFunc
+    glStencilMask
+    glStencilOp
+    glStencilFuncSeparate
+    glStencilMaskSeparate
+    glStencilOpSeparate
+    glBlendColor
+    glClampColor
+    glProvokingVertex
+    glClearBufferiv
+    glClearBufferuiv
+    glClearBufferfi
+    glSamplerParameterIiv
+    glSamplerParameterIuiv
+    glGetSamplerParameterIiv
+    glGetSamplerParameterIuiv
+    glBeginQuery
+    glEndQuery
+    glGetQueryiv
+    glIsQuery
+    glGetBufferPointerv
+    glGetInteger64i_v
+    glGetSynciv
+    glValidateProgram
+    glDetachShader
+    glGetBooleani_v
+    glIsEnabledi
+    glDrawRangeElementsBaseVertex
+    glMultiDrawElements
+    glPrimitiveRestartIndex

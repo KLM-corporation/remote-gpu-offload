@@ -166,6 +166,35 @@ int main(int argc, char** argv) {
         Check(c.m_client.IsValid(), "client connection stayed open");
     }
 
+    std::printf("[gl_server] uniform buffer lifecycle\n");
+    {
+        Case c(port++);
+        bool ok = c.Handshake() && c.CreateContext(64, 48) == 0;
+        if (ok) {
+            std::vector<uint8_t> batch;
+            const GlIdArgs gen = {1};
+            AddCommand(batch, GLF_GenBuffer, &gen, sizeof(gen));
+
+            const GlBindBufferArgs bind = {0x8A11 /*GL_UNIFORM_BUFFER*/, 1};
+            AddCommand(batch, GLF_BindBuffer, &bind, sizeof(bind));
+
+            std::vector<uint8_t> bufDataCmd;
+            const GlBufferDataArgs bda = {0x8A11 /*GL_UNIFORM_BUFFER*/, 0x88E4 /*GL_STATIC_DRAW*/, 64};
+            bufDataCmd.resize(sizeof(bda) + 64, 0xAB);
+            std::memcpy(bufDataCmd.data(), &bda, sizeof(bda));
+            AddCommand(batch, GLF_BufferData, bufDataCmd.data(), static_cast<uint32_t>(bufDataCmd.size()));
+
+            const GlIdArgs del = {1};
+            AddCommand(batch, GLF_DeleteBuffer, &del, sizeof(del));
+            AddCommand(batch, GLF_Flush, nullptr, 0);
+
+            ok = c.Send(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size()));
+            Check(ok && c.m_client.IsValid(), "uniform buffer lifecycle accepted");
+        } else {
+            Check(false, "uniform buffer lifecycle accepted");
+        }
+    }
+
     std::printf("[gl_server] hostile input\n");
     {
         std::vector<uint8_t> b;
@@ -206,6 +235,18 @@ int main(int argc, char** argv) {
         const uint8_t four[4] = {0, 0, 0, 0};
         AddCommand(b, GLF_Flush, four, 4);  // second command has a size no flush accepts
         ExpectRejected(port++, "flush with arguments after a valid command", b);
+
+        b.clear();
+        const GlBindBufferArgs bad_bind = {0x9999, 1};
+        AddCommand(b, GLF_BindBuffer, &bad_bind, sizeof(bad_bind));
+        ExpectRejected(port++, "unsupported buffer target in glBindBuffer", b);
+
+        b.clear();
+        const GlBufferDataArgs bad_bda = {0x8A11, 0x88E4, 16};
+        std::vector<uint8_t> bad_ubo(sizeof(bad_bda) + 16, 0);
+        std::memcpy(bad_ubo.data(), &bad_bda, sizeof(bad_bda));
+        AddCommand(b, GLF_BufferData, bad_ubo.data(), static_cast<uint32_t>(bad_ubo.size()));
+        ExpectRejected(port++, "buffer data on unbound uniform buffer target", b);
     }
 
     std::printf("[gl_server] protocol order and limits\n");

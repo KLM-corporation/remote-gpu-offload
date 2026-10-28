@@ -382,6 +382,8 @@ void WINAPI glGetIntegerv(unsigned pname, int* params) {
         case 0x8CDF: *params = 8; break;     // GL_MAX_COLOR_ATTACHMENTS
         case 0x8A2F: *params = 16; break;    // GL_MAX_UNIFORM_BUFFER_BINDINGS
         case 0x8A30: *params = 65536; break; // GL_MAX_UNIFORM_BLOCK_SIZE
+        case 0x8A34: *params = 256; break;   // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
+        case 0x84FF: *params = 16; break;    // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
         case 0x9126: *params = 1; break;     // GL_CONTEXT_PROFILE_MASK (Core)
         case 0x0BA2: // GL_VIEWPORT
             params[0] = 0; params[1] = 0;
@@ -401,6 +403,8 @@ void WINAPI glGetFloatv(unsigned pname, float* params) {
         params[0] = 0.0f; params[1] = 0.0f;
         params[2] = static_cast<float>(t_current ? t_current->session.Width() : kFallbackWidth);
         params[3] = static_cast<float>(t_current ? t_current->session.Height() : kFallbackHeight);
+    } else if (pname == 0x84FF) { // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        *params = 16.0f;
     } else {
         *params = 0.0f;
     }
@@ -413,6 +417,8 @@ void WINAPI glGetDoublev(unsigned pname, double* params) {
         params[0] = 0.0; params[1] = 0.0;
         params[2] = static_cast<double>(t_current ? t_current->session.Width() : kFallbackWidth);
         params[3] = static_cast<double>(t_current ? t_current->session.Height() : kFallbackHeight);
+    } else if (pname == 0x84FF) { // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+        *params = 16.0;
     } else {
         *params = 0.0;
     }
@@ -439,10 +445,29 @@ void WINAPI glGetInternalformativ(unsigned, unsigned, unsigned pname, int count,
     for (int i = 0; i < count; ++i) params[i] = (pname == 0x8262) ? 1 : 0;
 }
 
-void WINAPI glGetTexLevelParameteriv(unsigned, int, unsigned pname, int* params) {
+struct ProxyTextureLevel {
+    int width = 0;
+    int height = 0;
+    int internalformat = 0;
+};
+static std::map<std::pair<unsigned, int>, ProxyTextureLevel> g_proxyTextures;
+static std::mutex g_proxyMutex;
+
+void WINAPI glGetTexLevelParameteriv(unsigned target, int level, unsigned pname, int* params) {
     if (!params) return;
-    Log("[GL] glGetTexLevelParameteriv(0x%X)", pname);
     *params = 0;
+    std::lock_guard<std::mutex> lock(g_proxyMutex);
+    auto it = g_proxyTextures.find({target, level});
+    if (it != g_proxyTextures.end()) {
+        if (pname == 0x1000) {        // GL_TEXTURE_WIDTH
+            *params = it->second.width;
+        } else if (pname == 0x1001) { // GL_TEXTURE_HEIGHT
+            *params = it->second.height;
+        } else if (pname == 0x1003) { // GL_TEXTURE_INTERNAL_FORMAT
+            *params = it->second.internalformat;
+        }
+    }
+    Log("[GL] glGetTexLevelParameteriv(target: 0x%X, level: %d, pname: 0x%X) -> %d", target, level, pname, *params);
 }
 
 void WINAPI glPixelStorei(unsigned pname, int param) {
@@ -455,8 +480,53 @@ void WINAPI glGetIntegeri_v(unsigned pname, unsigned index, int* params) {
     glGetIntegerv(pname, params);
 }
 
-void WINAPI glGetBufferParameteri64v(unsigned, unsigned, long long* params) {
-    if (params) *params = 0;
+void WINAPI glGetInteger64i_v(unsigned target, unsigned index, long long* data) {
+    if (data) *data = 0;
+}
+
+struct ClientBuffer {
+    std::vector<uint8_t> storage;
+};
+static std::map<unsigned, ClientBuffer> g_clientBuffers;
+static std::map<unsigned, unsigned> g_currentBoundBuffers;
+static std::mutex g_bufferMutex;
+
+inline bool IsServerBufferTarget(unsigned target) {
+    return target == 0x8892 /*GL_ARRAY_BUFFER*/ ||
+           target == 0x8893 /*GL_ELEMENT_ARRAY_BUFFER*/ ||
+           target == 0x8A11 /*GL_UNIFORM_BUFFER*/;
+}
+
+void WINAPI glGetBufferParameteriv(unsigned target, unsigned pname, int* params) {
+    if (!params) return;
+    *params = 0;
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    unsigned boundId = g_currentBoundBuffers[target];
+    if (boundId != 0) {
+        auto it = g_clientBuffers.find(boundId);
+        if (it != g_clientBuffers.end()) {
+            if (pname == 0x8764) { // GL_BUFFER_SIZE
+                *params = static_cast<int>(it->second.storage.size());
+            } else if (pname == 0x8882) { // GL_BUFFER_MAPPED
+                *params = 0;
+            }
+        }
+    }
+}
+
+void WINAPI glGetBufferParameteri64v(unsigned target, unsigned pname, long long* params) {
+    if (!params) return;
+    *params = 0;
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    unsigned boundId = g_currentBoundBuffers[target];
+    if (boundId != 0) {
+        auto it = g_clientBuffers.find(boundId);
+        if (it != g_clientBuffers.end()) {
+            if (pname == 0x8764) { // GL_BUFFER_SIZE
+                *params = static_cast<long long>(it->second.storage.size());
+            }
+        }
+    }
 }
 
 void WINAPI glGetVertexAttribiv(unsigned, unsigned pname, int* params) {
@@ -483,12 +553,59 @@ void WINAPI glBindRenderbuffer(unsigned target, unsigned renderbuffer) {
 
 void WINAPI glFramebufferTexture2D(unsigned, unsigned, unsigned, unsigned, int) {}
 void WINAPI glFramebufferRenderbuffer(unsigned, unsigned, unsigned, unsigned) {}
+void WINAPI glFramebufferTextureLayer(unsigned target, unsigned attachment, unsigned texture, int level, int layer) {
+    Log("[GL] glFramebufferTextureLayer(0x%X, 0x%X, %u, %d, %d)", target, attachment, texture, level, layer);
+}
+void WINAPI glFramebufferTexture(unsigned target, unsigned attachment, unsigned texture, int level) {
+    Log("[GL] glFramebufferTexture(0x%X, 0x%X, %u, %d)", target, attachment, texture, level);
+}
+void WINAPI glFramebufferTexture1D(unsigned target, unsigned attachment, unsigned textarget, unsigned texture, int level) {
+    Log("[GL] glFramebufferTexture1D(0x%X, 0x%X, 0x%X, %u, %d)", target, attachment, textarget, texture, level);
+}
+void WINAPI glFramebufferTexture3D(unsigned target, unsigned attachment, unsigned textarget, unsigned texture, int level, int zoffset) {
+    Log("[GL] glFramebufferTexture3D(0x%X, 0x%X, 0x%X, %u, %d, %d)", target, attachment, textarget, texture, level, zoffset);
+}
+void WINAPI glGetFramebufferAttachmentParameteriv(unsigned, unsigned, unsigned, int* params) {
+    if (params) *params = 0;
+}
+void WINAPI glGetRenderbufferParameteriv(unsigned, unsigned, int* params) {
+    if (params) *params = 0;
+}
+void WINAPI glBindFragDataLocation(unsigned program, unsigned colorNumber, const char* name) {
+    Log("[GL] glBindFragDataLocation(%u, %u, %s)", program, colorNumber, name ? name : "null");
+}
+int WINAPI glGetFragDataLocation(unsigned program, const char* name) {
+    Log("[GL] glGetFragDataLocation(%u, %s)", program, name ? name : "null");
+    return 0;
+}
 void WINAPI glGenFramebuffers(int count, unsigned* ids) {
     static unsigned next_id = 1;
     if (!ids || count < 0) return;
     for (int i = 0; i < count; ++i) ids[i] = next_id++;
 }
 void WINAPI glDeleteFramebuffers(int, const unsigned*) {}
+
+static unsigned g_nextRenderbufferId = 1;
+void WINAPI glGenRenderbuffers(int count, unsigned* ids) {
+    if (!ids || count < 0) return;
+    for (int i = 0; i < count; ++i) ids[i] = g_nextRenderbufferId++;
+}
+void WINAPI glDeleteRenderbuffers(int, const unsigned*) {}
+void WINAPI glRenderbufferStorage(unsigned target, unsigned internalformat, int width, int height) {
+    Log("[GL] glRenderbufferStorage(0x%X, 0x%X, %dx%d)", target, internalformat, width, height);
+}
+void WINAPI glRenderbufferStorageMultisample(unsigned target, int samples, unsigned internalformat, int width, int height) {
+    Log("[GL] glRenderbufferStorageMultisample(0x%X, %d, 0x%X, %dx%d)", target, samples, internalformat, width, height);
+}
+void WINAPI glBlitFramebuffer(int srcX0, int srcY0, int srcX1, int srcY1,
+                             int dstX0, int dstY0, int dstX1, int dstY1,
+                             unsigned mask, unsigned filter) {
+    Log("[GL] glBlitFramebuffer(%d,%d,%d,%d -> %d,%d,%d,%d, mask: 0x%X, filter: 0x%X)",
+        srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+}
+void WINAPI glDrawBuffers(int n, const unsigned* bufs) {
+    Log("[GL] glDrawBuffers(n: %d)", n);
+}
 
 void WINAPI glGetBooleanv(unsigned pname, unsigned char* params) {
     if (!params) return;
@@ -497,6 +614,14 @@ void WINAPI glGetBooleanv(unsigned pname, unsigned char* params) {
         case 0x0C11: *params = 0; break; // GL_STEREO
         default:     *params = 0; break;
     }
+}
+
+void WINAPI glGetBooleani_v(unsigned target, unsigned index, unsigned char* data) {
+    if (data) *data = 0;
+}
+
+unsigned char WINAPI glIsEnabledi(unsigned target, unsigned index) {
+    return 0;
 }
 
 unsigned WINAPI glGetError() {
@@ -563,14 +688,161 @@ void WINAPI glTexParameteri(unsigned target, unsigned pname, int param) {
     Log("[GL] glTexParameteri(0x%X, 0x%X, %d)", target, pname, param);
 }
 
+void WINAPI glTexParameterf(unsigned target, unsigned pname, float param) {
+    Log("[GL] glTexParameterf(0x%X, 0x%X, %f)", target, pname, param);
+}
+
+void WINAPI glTexParameteriv(unsigned target, unsigned pname, const int* params) {
+    Log("[GL] glTexParameteriv(0x%X, 0x%X)", target, pname);
+}
+
+void WINAPI glTexParameterfv(unsigned target, unsigned pname, const float* params) {
+    Log("[GL] glTexParameterfv(0x%X, 0x%X)", target, pname);
+}
+
+void WINAPI glGetTexParameteriv(unsigned target, unsigned pname, int* params) {
+    if (params) *params = 0;
+}
+
+void WINAPI glGetTexParameterfv(unsigned target, unsigned pname, float* params) {
+    if (params) *params = 0.0f;
+}
+
+void WINAPI glTexImage1D(unsigned target, int level, int internalformat, int width,
+                         int border, unsigned format, unsigned type, const void* pixels) {
+    Log("[GL] glTexImage1D(0x%X, level: %d, internal: %d, %d, pixels: %p)",
+        target, level, internalformat, width, pixels);
+    const bool isProxy = (target == 0x8063 /*GL_PROXY_TEXTURE_1D*/);
+    const int maxDim = 16384;
+    std::lock_guard<std::mutex> lock(g_proxyMutex);
+    if (isProxy) {
+        if (width > 0 && width <= maxDim) {
+            g_proxyTextures[{target, level}] = {width, 1, internalformat};
+        } else {
+            g_proxyTextures[{target, level}] = {0, 0, 0};
+        }
+    } else {
+        g_proxyTextures[{target, level}] = {width, 1, internalformat};
+    }
+}
+
 void WINAPI glTexImage2D(unsigned target, int level, int internalformat, int width, int height,
                          int border, unsigned format, unsigned type, const void* pixels) {
     Log("[GL] glTexImage2D(0x%X, level: %d, internal: %d, %dx%d, pixels: %p)",
         target, level, internalformat, width, height, pixels);
+    const bool isProxy = (target == 0x8063 /*GL_PROXY_TEXTURE_1D*/ ||
+                          target == 0x8064 /*GL_PROXY_TEXTURE_2D*/ ||
+                          target == 0x8070 /*GL_PROXY_TEXTURE_3D*/ ||
+                          target == 0x851B /*GL_PROXY_TEXTURE_CUBE_MAP*/ ||
+                          target == 0x8C1F /*GL_PROXY_TEXTURE_2D_ARRAY*/);
+    const int maxDim = (target == 0x8070 || target == 0x851B) ? 2048 : 16384;
+    std::lock_guard<std::mutex> lock(g_proxyMutex);
+    if (isProxy) {
+        if (width > 0 && height > 0 && width <= maxDim && height <= maxDim) {
+            g_proxyTextures[{target, level}] = {width, height, internalformat};
+        } else {
+            g_proxyTextures[{target, level}] = {0, 0, 0};
+        }
+    } else {
+        g_proxyTextures[{target, level}] = {width, height, internalformat};
+    }
+}
+
+void WINAPI glTexImage3D(unsigned target, int level, int internalformat, int width, int height, int depth,
+                         int border, unsigned format, unsigned type, const void* pixels) {
+    Log("[GL] glTexImage3D(0x%X, level: %d, internal: %d, %dx%dx%d, pixels: %p)",
+        target, level, internalformat, width, height, depth, pixels);
+    const bool isProxy = (target == 0x8070 /*GL_PROXY_TEXTURE_3D*/);
+    const int maxDim = 2048;
+    std::lock_guard<std::mutex> lock(g_proxyMutex);
+    if (isProxy) {
+        if (width > 0 && height > 0 && depth > 0 && width <= maxDim && height <= maxDim && depth <= maxDim) {
+            g_proxyTextures[{target, level}] = {width, height, internalformat};
+        } else {
+            g_proxyTextures[{target, level}] = {0, 0, 0};
+        }
+    } else {
+        g_proxyTextures[{target, level}] = {width, height, internalformat};
+    }
+}
+
+void WINAPI glTexSubImage1D(unsigned target, int level, int xoffset, int width,
+                            unsigned format, unsigned type, const void* pixels) {
+    Log("[GL] glTexSubImage1D(0x%X, level: %d, xoff: %d, width: %d, format: 0x%X, type: 0x%X, pixels: %p)",
+        target, level, xoffset, width, format, type, pixels);
+}
+
+void WINAPI glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height,
+                            unsigned format, unsigned type, const void* pixels) {
+    Log("[GL] glTexSubImage2D(0x%X, level: %d, xoff: %d, yoff: %d, %dx%d, format: 0x%X, type: 0x%X, pixels: %p)",
+        target, level, xoffset, yoffset, width, height, format, type, pixels);
+}
+
+void WINAPI glTexSubImage3D(unsigned target, int level, int xoffset, int yoffset, int zoffset,
+                            int width, int height, int depth, unsigned format, unsigned type, const void* pixels) {
+    Log("[GL] glTexSubImage3D(0x%X, level: %d, xoff: %d, yoff: %d, zoff: %d, %dx%dx%d, format: 0x%X, type: 0x%X, pixels: %p)",
+        target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+}
+
+void WINAPI glCopyTexSubImage2D(unsigned target, int level, int xoffset, int yoffset,
+                                int x, int y, int width, int height) {
+    Log("[GL] glCopyTexSubImage2D(target: 0x%X, level: %d, xoff: %d, yoff: %d, %d, %d, %dx%d)",
+        target, level, xoffset, yoffset, x, y, width, height);
+}
+
+void WINAPI glGenerateMipmap(unsigned target) {
+    Log("[GL] glGenerateMipmap(target: 0x%X)", target);
+}
+
+void WINAPI glCopyTexImage1D(unsigned target, int level, unsigned internalformat, int x, int y, int width, int border) {
+    Log("[GL] glCopyTexImage1D(0x%X, level: %d, internal: 0x%X, %d, %d, %d)", target, level, internalformat, x, y, width);
+}
+
+void WINAPI glCopyTexImage2D(unsigned target, int level, unsigned internalformat, int x, int y, int width, int height, int border) {
+    Log("[GL] glCopyTexImage2D(0x%X, level: %d, internal: 0x%X, %d, %d, %dx%d)", target, level, internalformat, x, y, width, height);
+}
+
+void WINAPI glCopyTexSubImage1D(unsigned target, int level, int xoffset, int x, int y, int width) {
+    Log("[GL] glCopyTexSubImage1D(0x%X, %d, %d, %d, %d, %d)", target, level, xoffset, x, y, width);
+}
+
+void WINAPI glCopyTexSubImage3D(unsigned target, int level, int xoffset, int yoffset, int zoffset, int x, int y, int width, int height) {
+    Log("[GL] glCopyTexSubImage3D(0x%X, %d, %d, %d, %d, %d, %d, %dx%d)", target, level, xoffset, yoffset, zoffset, x, y, width, height);
+}
+
+void WINAPI glPixelStoref(unsigned pname, float param) {
+    Log("[GL] glPixelStoref(0x%X, %f)", pname, param);
+}
+
+void WINAPI glGetTexLevelParameterfv(unsigned target, int level, unsigned pname, float* params) {
+    if (!params) return;
+    int iparam = 0;
+    glGetTexLevelParameteriv(target, level, pname, &iparam);
+    *params = static_cast<float>(iparam);
+}
+
+void WINAPI glTexParameterIiv(unsigned target, unsigned pname, const int* params) {
+    Log("[GL] glTexParameterIiv(0x%X, 0x%X)", target, pname);
+}
+
+void WINAPI glTexParameterIuiv(unsigned target, unsigned pname, const unsigned* params) {
+    Log("[GL] glTexParameterIuiv(0x%X, 0x%X)", target, pname);
+}
+
+void WINAPI glGetTexParameterIiv(unsigned, unsigned, int* params) {
+    if (params) *params = 0;
+}
+
+void WINAPI glGetTexParameterIuiv(unsigned, unsigned, unsigned* params) {
+    if (params) *params = 0;
 }
 
 void WINAPI glActiveTexture(unsigned texture) {
     Log("[GL] glActiveTexture(0x%X)", texture);
+}
+
+void WINAPI glClientActiveTexture(unsigned texture) {
+    glActiveTexture(texture);
 }
 
 void WINAPI glGenVertexArrays(int count, unsigned* arrays) {
@@ -593,6 +865,15 @@ void WINAPI glVertexAttribPointer(unsigned index, int size, unsigned type, unsig
         index, size, type, normalized, stride, pointer);
 }
 
+void WINAPI glVertexAttribIPointer(unsigned index, int size, unsigned type, int stride, const void* pointer) {
+    Log("[GL] glVertexAttribIPointer(idx: %u, size: %d, type: 0x%X, stride: %d, ptr: %p)",
+        index, size, type, stride, pointer);
+}
+
+void WINAPI glVertexAttribDivisor(unsigned index, unsigned divisor) {
+    Log("[GL] glVertexAttribDivisor(idx: %u, divisor: %u)", index, divisor);
+}
+
 void WINAPI glEnableVertexAttribArray(unsigned index) {
     Log("[GL] glEnableVertexAttribArray(%u)", index);
 }
@@ -609,6 +890,170 @@ int WINAPI glGetUniformLocation(unsigned program, const char* name) {
 int WINAPI glGetAttribLocation(unsigned program, const char* name) {
     Log("[GL] glGetAttribLocation(prog: %u, name: %s)", program, name ? name : "null");
     return 0;
+}
+
+void WINAPI glUniform1i(int location, int v0) {
+    Log("[GL] glUniform1i(loc: %d, val: %d)", location, v0);
+}
+
+void WINAPI glUniform1iv(int location, int count, const int* value) {
+    Log("[GL] glUniform1iv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform1f(int location, float v0) {
+    Log("[GL] glUniform1f(loc: %d, val: %f)", location, v0);
+}
+
+void WINAPI glUniform1fv(int location, int count, const float* value) {
+    Log("[GL] glUniform1fv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform2f(int location, float v0, float v1) {
+    Log("[GL] glUniform2f(loc: %d, %f, %f)", location, v0, v1);
+}
+
+void WINAPI glUniform2fv(int location, int count, const float* value) {
+    Log("[GL] glUniform2fv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform3f(int location, float v0, float v1, float v2) {
+    Log("[GL] glUniform3f(loc: %d, %f, %f, %f)", location, v0, v1, v2);
+}
+
+void WINAPI glUniform3fv(int location, int count, const float* value) {
+    Log("[GL] glUniform3fv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform4f(int location, float v0, float v1, float v2, float v3) {
+    Log("[GL] glUniform4f(loc: %d, %f, %f, %f, %f)", location, v0, v1, v2, v3);
+}
+
+void WINAPI glUniform4fv(int location, int count, const float* value) {
+    Log("[GL] glUniform4fv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniformMatrix2fv(int location, int count, unsigned char transpose, const float* value) {
+    Log("[GL] glUniformMatrix2fv(loc: %d, count: %d, trans: %u)", location, count, transpose);
+}
+
+void WINAPI glUniformMatrix3fv(int location, int count, unsigned char transpose, const float* value) {
+    Log("[GL] glUniformMatrix3fv(loc: %d, count: %d, trans: %u)", location, count, transpose);
+}
+
+void WINAPI glUniformMatrix4fv(int location, int count, unsigned char transpose, const float* value) {
+    Log("[GL] glUniformMatrix4fv(loc: %d, count: %d, trans: %u)", location, count, transpose);
+}
+
+void WINAPI glUniform2i(int location, int v0, int v1) {
+    Log("[GL] glUniform2i(loc: %d, %d, %d)", location, v0, v1);
+}
+
+void WINAPI glUniform3i(int location, int v0, int v1, int v2) {
+    Log("[GL] glUniform3i(loc: %d, %d, %d, %d)", location, v0, v1, v2);
+}
+
+void WINAPI glUniform4i(int location, int v0, int v1, int v2, int v3) {
+    Log("[GL] glUniform4i(loc: %d, %d, %d, %d, %d)", location, v0, v1, v2, v3);
+}
+
+void WINAPI glUniform2iv(int location, int count, const int* value) {
+    Log("[GL] glUniform2iv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform3iv(int location, int count, const int* value) {
+    Log("[GL] glUniform3iv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform4iv(int location, int count, const int* value) {
+    Log("[GL] glUniform4iv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform1ui(int location, unsigned v0) {
+    Log("[GL] glUniform1ui(loc: %d, %u)", location, v0);
+}
+
+void WINAPI glUniform2ui(int location, unsigned v0, unsigned v1) {
+    Log("[GL] glUniform2ui(loc: %d, %u, %u)", location, v0, v1);
+}
+
+void WINAPI glUniform3ui(int location, unsigned v0, unsigned v1, unsigned v2) {
+    Log("[GL] glUniform3ui(loc: %d, %u, %u, %u)", location, v0, v1, v2);
+}
+
+void WINAPI glUniform4ui(int location, unsigned v0, unsigned v1, unsigned v2, unsigned v3) {
+    Log("[GL] glUniform4ui(loc: %d, %u, %u, %u, %u)", location, v0, v1, v2, v3);
+}
+
+void WINAPI glUniform1uiv(int location, int count, const unsigned* value) {
+    Log("[GL] glUniform1uiv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform2uiv(int location, int count, const unsigned* value) {
+    Log("[GL] glUniform2uiv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform3uiv(int location, int count, const unsigned* value) {
+    Log("[GL] glUniform3uiv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glUniform4uiv(int location, int count, const unsigned* value) {
+    Log("[GL] glUniform4uiv(loc: %d, count: %d)", location, count);
+}
+
+void WINAPI glGetUniformuiv(unsigned, int, unsigned* params) {
+    if (params) *params = 0;
+}
+
+static std::map<std::pair<unsigned, std::string>, unsigned> g_uniformBlockIndices;
+static unsigned g_nextBlockIndex = 0;
+static std::mutex g_blockMutex;
+
+unsigned WINAPI glGetUniformBlockIndex(unsigned program, const char* name) {
+    std::string sname = name ? name : "";
+    std::lock_guard<std::mutex> lock(g_blockMutex);
+    auto it = g_uniformBlockIndices.find({program, sname});
+    if (it != g_uniformBlockIndices.end()) {
+        return it->second;
+    }
+    unsigned idx = g_nextBlockIndex++;
+    g_uniformBlockIndices[{program, sname}] = idx;
+    Log("[GL] glGetUniformBlockIndex(prog: %u, name: %s) -> %u", program, sname.c_str(), idx);
+    return idx;
+}
+
+void WINAPI glUniformBlockBinding(unsigned program, unsigned uniformBlockIndex, unsigned uniformBlockBinding) {
+    Log("[GL] glUniformBlockBinding(prog: %u, index: %u, binding: %u)", program, uniformBlockIndex, uniformBlockBinding);
+}
+
+void WINAPI glGetActiveUniformBlockiv(unsigned program, unsigned uniformBlockIndex, unsigned pname, int* params) {
+    if (!params) return;
+    switch (pname) {
+        case 0x8A40: *params = 1024; break; // GL_UNIFORM_BLOCK_DATA_SIZE
+        case 0x8A3F: *params = 0; break;    // GL_UNIFORM_BLOCK_BINDING
+        case 0x8A43: *params = 0; break;    // GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS
+        default:     *params = 0; break;
+    }
+    Log("[GL] glGetActiveUniformBlockiv(prog: %u, idx: %u, pname: 0x%X) -> %d", program, uniformBlockIndex, pname, *params);
+}
+
+void WINAPI glGetActiveUniformBlockName(unsigned, unsigned, int bufSize, int* length, char* uniformBlockName) {
+    if (length) *length = 0;
+    if (uniformBlockName && bufSize > 0) uniformBlockName[0] = 0;
+}
+
+void WINAPI glGetActiveUniformsiv(unsigned, int uniformCount, const unsigned*, unsigned, int* params) {
+    if (!params || uniformCount <= 0) return;
+    for (int i = 0; i < uniformCount; ++i) params[i] = 0;
+}
+
+void WINAPI glGetActiveUniformName(unsigned, unsigned, int bufSize, int* length, char* uniformName) {
+    if (length) *length = 0;
+    if (uniformName && bufSize > 0) uniformName[0] = 0;
+}
+
+void WINAPI glGetUniformIndices(unsigned, int uniformCount, const char* const*, unsigned* uniformIndices) {
+    if (!uniformIndices || uniformCount <= 0) return;
+    for (int i = 0; i < uniformCount; ++i) uniformIndices[i] = static_cast<unsigned>(i);
 }
 
 void WINAPI glGetShaderiv(unsigned shader, unsigned pname, int* params) {
@@ -645,9 +1090,203 @@ void WINAPI glBlendFunc(unsigned sfactor, unsigned dfactor) {
     Log("[GL] glBlendFunc(0x%X, 0x%X)", sfactor, dfactor);
 }
 
+void WINAPI glBlendFuncSeparate(unsigned sfactorRGB, unsigned dfactorRGB, unsigned sfactorAlpha, unsigned dfactorAlpha) {
+    Log("[GL] glBlendFuncSeparate(0x%X, 0x%X, 0x%X, 0x%X)", sfactorRGB, dfactorRGB, sfactorAlpha, dfactorAlpha);
+}
+
+void WINAPI glBlendEquation(unsigned mode) {
+    Log("[GL] glBlendEquation(0x%X)", mode);
+}
+
+void WINAPI glBlendEquationSeparate(unsigned modeRGB, unsigned modeAlpha) {
+    Log("[GL] glBlendEquationSeparate(0x%X, 0x%X)", modeRGB, modeAlpha);
+}
+
 void WINAPI glDepthFunc(unsigned func) { Log("[GL] glDepthFunc(0x%X)", func); }
 void WINAPI glDepthMask(unsigned char flag) { Log("[GL] glDepthMask(%u)", flag); }
+void WINAPI glDepthRange(double nearVal, double farVal) { Log("[GL] glDepthRange(%f, %f)", nearVal, farVal); }
+void WINAPI glDepthRangef(float nearVal, float farVal) { glDepthRange(static_cast<double>(nearVal), static_cast<double>(farVal)); }
 void WINAPI glCullFace(unsigned mode) { Log("[GL] glCullFace(0x%X)", mode); }
+
+void WINAPI glScissor(int x, int y, int width, int height) {
+    Log("[GL] glScissor(%d, %d, %d, %d)", x, y, width, height);
+}
+
+void WINAPI glColorMask(unsigned char red, unsigned char green, unsigned char blue, unsigned char alpha) {
+    Log("[GL] glColorMask(%u, %u, %u, %u)", red, green, blue, alpha);
+}
+
+void WINAPI glColorMaski(unsigned index, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+    Log("[GL] glColorMaski(idx: %u, %u, %u, %u, %u)", index, r, g, b, a);
+}
+
+void WINAPI glClearDepth(double depth) {
+    Log("[GL] glClearDepth(%f)", depth);
+}
+
+void WINAPI glClearDepthf(float depth) {
+    glClearDepth(static_cast<double>(depth));
+}
+
+void WINAPI glClearStencil(int s) {
+    Log("[GL] glClearStencil(%d)", s);
+}
+
+void WINAPI glPolygonMode(unsigned face, unsigned mode) {
+    Log("[GL] glPolygonMode(0x%X, 0x%X)", face, mode);
+}
+
+void WINAPI glPolygonOffset(float factor, float units) {
+    Log("[GL] glPolygonOffset(%f, %f)", factor, units);
+}
+
+void WINAPI glFrontFace(unsigned mode) {
+    Log("[GL] glFrontFace(0x%X)", mode);
+}
+
+void WINAPI glLineWidth(float width) {
+    Log("[GL] glLineWidth(%f)", width);
+}
+
+void WINAPI glPointSize(float size) {
+    Log("[GL] glPointSize(%f)", size);
+}
+
+void WINAPI glStencilFunc(unsigned func, int ref, unsigned mask) {
+    Log("[GL] glStencilFunc(0x%X, %d, 0x%X)", func, ref, mask);
+}
+
+void WINAPI glStencilMask(unsigned mask) {
+    Log("[GL] glStencilMask(0x%X)", mask);
+}
+
+void WINAPI glStencilOp(unsigned fail, unsigned zfail, unsigned zpass) {
+    Log("[GL] glStencilOp(0x%X, 0x%X, 0x%X)", fail, zfail, zpass);
+}
+
+void WINAPI glStencilFuncSeparate(unsigned face, unsigned func, int ref, unsigned mask) {
+    Log("[GL] glStencilFuncSeparate(0x%X, 0x%X, %d, 0x%X)", face, func, ref, mask);
+}
+
+void WINAPI glStencilMaskSeparate(unsigned face, unsigned mask) {
+    Log("[GL] glStencilMaskSeparate(0x%X, 0x%X)", face, mask);
+}
+
+void WINAPI glStencilOpSeparate(unsigned face, unsigned fail, unsigned zfail, unsigned zpass) {
+    Log("[GL] glStencilOpSeparate(0x%X, 0x%X, 0x%X, 0x%X)", face, fail, zfail, zpass);
+}
+
+void WINAPI glBlendColor(float red, float green, float blue, float alpha) {
+    Log("[GL] glBlendColor(%f, %f, %f, %f)", red, green, blue, alpha);
+}
+
+void WINAPI glClampColor(unsigned target, unsigned clamp) {
+    Log("[GL] glClampColor(0x%X, 0x%X)", target, clamp);
+}
+
+void WINAPI glProvokingVertex(unsigned mode) {
+    Log("[GL] glProvokingVertex(0x%X)", mode);
+}
+
+// --- Samplers -----------------------------------------------------------------------------------
+static unsigned g_nextSamplerId = 1;
+
+void WINAPI glGenSamplers(int count, unsigned* samplers) {
+    Log("[GL] glGenSamplers(%d)", count);
+    if (!samplers || count < 0) return;
+    for (int i = 0; i < count; ++i) {
+        samplers[i] = g_nextSamplerId++;
+    }
+}
+
+void WINAPI glDeleteSamplers(int count, const unsigned*) {
+    Log("[GL] glDeleteSamplers(%d)", count);
+}
+
+unsigned char WINAPI glIsSampler(unsigned id) {
+    return id > 0 ? 1 : 0;
+}
+
+void WINAPI glBindSampler(unsigned unit, unsigned sampler) {
+    Log("[GL] glBindSampler(unit: %u, sampler: %u)", unit, sampler);
+}
+
+void WINAPI glSamplerParameteri(unsigned sampler, unsigned pname, int param) {
+    Log("[GL] glSamplerParameteri(sampler: %u, pname: 0x%X, param: %d)", sampler, pname, param);
+}
+
+void WINAPI glSamplerParameterf(unsigned sampler, unsigned pname, float param) {
+    Log("[GL] glSamplerParameterf(sampler: %u, pname: 0x%X, param: %f)", sampler, pname, param);
+}
+
+void WINAPI glSamplerParameteriv(unsigned sampler, unsigned pname, const int* params) {
+    Log("[GL] glSamplerParameteriv(sampler: %u, pname: 0x%X)", sampler, pname);
+}
+
+void WINAPI glSamplerParameterfv(unsigned sampler, unsigned pname, const float* params) {
+    Log("[GL] glSamplerParameterfv(sampler: %u, pname: 0x%X)", sampler, pname);
+}
+
+void WINAPI glGetSamplerParameteriv(unsigned, unsigned, int* params) {
+    if (params) *params = 0;
+}
+
+void WINAPI glGetSamplerParameterfv(unsigned, unsigned, float* params) {
+    if (params) *params = 0.0f;
+}
+
+void WINAPI glSamplerParameterIiv(unsigned sampler, unsigned pname, const int* params) {
+    Log("[GL] glSamplerParameterIiv(%u, 0x%X)", sampler, pname);
+}
+
+void WINAPI glSamplerParameterIuiv(unsigned sampler, unsigned pname, const unsigned* params) {
+    Log("[GL] glSamplerParameterIuiv(%u, 0x%X)", sampler, pname);
+}
+
+void WINAPI glGetSamplerParameterIiv(unsigned sampler, unsigned pname, int* params) {
+    if (params) *params = 0;
+}
+
+void WINAPI glGetSamplerParameterIuiv(unsigned sampler, unsigned pname, unsigned* params) {
+    if (params) *params = 0;
+}
+
+static unsigned g_nextSyncId = 1;
+static std::mutex g_syncMutex;
+
+void* WINAPI glFenceSync(unsigned condition, unsigned flags) {
+    std::lock_guard<std::mutex> lock(g_syncMutex);
+    unsigned id = g_nextSyncId++;
+    Log("[GL] glFenceSync(cond: 0x%X, flags: 0x%X) -> %u", condition, flags, id);
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(id));
+}
+
+unsigned WINAPI glClientWaitSync(void* sync, unsigned flags, unsigned long long timeout) {
+    Log("[GL] glClientWaitSync(sync: %p, flags: 0x%X, timeout: %llu)", sync, flags, timeout);
+    return 0x911A; // GL_ALREADY_SIGNALED
+}
+
+void WINAPI glWaitSync(void* sync, unsigned flags, unsigned long long timeout) {
+    Log("[GL] glWaitSync(sync: %p, flags: 0x%X, timeout: %llu)", sync, flags, timeout);
+}
+
+void WINAPI glDeleteSync(void* sync) {
+    Log("[GL] glDeleteSync(sync: %p)", sync);
+}
+
+unsigned char WINAPI glIsSync(void* sync) {
+    return sync != nullptr ? 1 : 0;
+}
+
+void WINAPI glGetSynciv(void* sync, unsigned pname, int bufSize, int* length, int* values) {
+    if (length) *length = 1;
+    if (values && bufSize > 0) {
+        if (pname == 0x9114 /*GL_SYNC_STATUS*/) *values = 0x9119 /*GL_SIGNALED*/;
+        else if (pname == 0x9113 /*GL_SYNC_CONDITION*/) *values = 0x9118 /*GL_SYNC_GPU_COMMANDS_COMPLETE*/;
+        else if (pname == 0x9115 /*GL_SYNC_FLAGS*/) *values = 0;
+        else *values = 0;
+    }
+}
 
 // --- Existing relayed OpenGL functions ---------------------------------------------------------
 
@@ -715,26 +1354,168 @@ void WINAPI glGenBuffers(int count, unsigned* buffers) {
 }
 
 void WINAPI glBindBuffer(unsigned target, unsigned buffer) {
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        g_currentBoundBuffers[target] = buffer;
+    }
     if (!t_current) return;
-    const GlBindBufferArgs args = {target, buffer};
-    t_current->session.Append(GLF_BindBuffer, &args, sizeof(args));
+    if (IsServerBufferTarget(target)) {
+        const GlBindBufferArgs args = {target, buffer};
+        t_current->session.Append(GLF_BindBuffer, &args, sizeof(args));
+    }
 }
 
 void WINAPI glBufferData(unsigned target, ptrdiff_t size, const void* data, unsigned usage) {
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        unsigned boundId = g_currentBoundBuffers[target];
+        if (boundId != 0 && size >= 0) {
+            auto& buf = g_clientBuffers[boundId];
+            buf.storage.resize(static_cast<size_t>(size));
+            if (data && size > 0) {
+                std::memcpy(buf.storage.data(), data, static_cast<size_t>(size));
+            }
+        }
+    }
     if (!t_current || size < 0 || static_cast<uint64_t>(size) > 64 * 1024 * 1024) return;
-    const GlBufferDataArgs args = {target, usage, static_cast<uint64_t>(size)};
-    std::vector<uint8_t> payload(sizeof(args) + static_cast<size_t>(size));
-    std::memcpy(payload.data(), &args, sizeof(args));
-    if (data && size) std::memcpy(payload.data() + sizeof(args), data, static_cast<size_t>(size));
-    t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    if (IsServerBufferTarget(target)) {
+        const GlBufferDataArgs args = {target, usage, static_cast<uint64_t>(size)};
+        std::vector<uint8_t> payload(sizeof(args) + static_cast<size_t>(size));
+        std::memcpy(payload.data(), &args, sizeof(args));
+        if (data && size) std::memcpy(payload.data() + sizeof(args), data, static_cast<size_t>(size));
+        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+}
+
+void WINAPI glBufferSubData(unsigned target, ptrdiff_t offset, ptrdiff_t size, const void* data) {
+    Log("[GL] glBufferSubData(target: 0x%X, offset: %td, size: %td, data: %p)", target, offset, size, data);
+    std::vector<uint8_t> fullBufferCopy;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        unsigned boundId = g_currentBoundBuffers[target];
+        if (boundId != 0 && data && size > 0 && offset >= 0) {
+            auto& buf = g_clientBuffers[boundId];
+            if (buf.storage.size() < static_cast<size_t>(offset + size)) {
+                buf.storage.resize(static_cast<size_t>(offset + size));
+            }
+            std::memcpy(buf.storage.data() + offset, data, static_cast<size_t>(size));
+            if (IsServerBufferTarget(target)) {
+                fullBufferCopy = buf.storage;
+            }
+        }
+    }
+    if (!fullBufferCopy.empty() && t_current && fullBufferCopy.size() <= 64 * 1024 * 1024) {
+        const GlBufferDataArgs args = {target, 0x88E4 /*GL_STATIC_DRAW*/, static_cast<uint64_t>(fullBufferCopy.size())};
+        std::vector<uint8_t> payload(sizeof(args) + fullBufferCopy.size());
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), fullBufferCopy.data(), fullBufferCopy.size());
+        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+}
+
+void WINAPI glGetBufferSubData(unsigned target, ptrdiff_t offset, ptrdiff_t size, void* data) {
+    Log("[GL] glGetBufferSubData(target: 0x%X, offset: %td, size: %td, data: %p)", target, offset, size, data);
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    unsigned boundId = g_currentBoundBuffers[target];
+    if (boundId != 0 && data && size > 0 && offset >= 0) {
+        auto it = g_clientBuffers.find(boundId);
+        if (it != g_clientBuffers.end() && it->second.storage.size() >= static_cast<size_t>(offset + size)) {
+            std::memcpy(data, it->second.storage.data() + offset, static_cast<size_t>(size));
+            return;
+        }
+    }
+    if (data && size > 0) std::memset(data, 0, static_cast<size_t>(size));
 }
 
 void WINAPI glDeleteBuffers(int count, const unsigned* buffers) {
+    if (count > 0 && buffers) {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        for (int i = 0; i < count; ++i) {
+            g_clientBuffers.erase(buffers[i]);
+            for (auto& pair : g_currentBoundBuffers) {
+                if (pair.second == buffers[i]) pair.second = 0;
+            }
+        }
+    }
     if (!t_current || !buffers || count < 0 || count > 4096) return;
     for (int i = 0; i < count; ++i) {
         const GlIdArgs args = {buffers[i]};
         t_current->session.Append(GLF_DeleteBuffer, &args, sizeof(args));
     }
+}
+
+void* WINAPI glMapBufferRange(unsigned target, ptrdiff_t offset, ptrdiff_t length, unsigned access) {
+    Log("[GL] glMapBufferRange(target: 0x%X, offset: %td, len: %td, access: 0x%X)", target, offset, length, access);
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    unsigned boundId = g_currentBoundBuffers[target];
+    if (boundId != 0) {
+        auto& buf = g_clientBuffers[boundId];
+        if (offset < 0 || length < 0) return nullptr;
+        if (buf.storage.size() < static_cast<size_t>(offset + length)) {
+            buf.storage.resize(static_cast<size_t>(offset + length));
+        }
+        return buf.storage.data() + offset;
+    }
+    static std::vector<uint8_t> fallback(16 * 1024 * 1024);
+    if (offset >= 0 && length >= 0 && static_cast<size_t>(offset + length) <= fallback.size()) {
+        return fallback.data() + offset;
+    }
+    return fallback.data();
+}
+
+unsigned char WINAPI glUnmapBuffer(unsigned target) {
+    Log("[GL] glUnmapBuffer(target: 0x%X)", target);
+    std::vector<uint8_t> fullBufferCopy;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        unsigned boundId = g_currentBoundBuffers[target];
+        if (boundId != 0 && IsServerBufferTarget(target)) {
+            auto it = g_clientBuffers.find(boundId);
+            if (it != g_clientBuffers.end()) {
+                fullBufferCopy = it->second.storage;
+            }
+        }
+    }
+    if (!fullBufferCopy.empty() && t_current && fullBufferCopy.size() <= 64 * 1024 * 1024) {
+        const GlBufferDataArgs args = {target, 0x88E4 /*GL_STATIC_DRAW*/, static_cast<uint64_t>(fullBufferCopy.size())};
+        std::vector<uint8_t> payload(sizeof(args) + fullBufferCopy.size());
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), fullBufferCopy.data(), fullBufferCopy.size());
+        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+    return 1;
+}
+
+void WINAPI glFlushMappedBufferRange(unsigned target, ptrdiff_t offset, ptrdiff_t length) {
+    Log("[GL] glFlushMappedBufferRange(target: 0x%X, offset: %td, len: %td)", target, offset, length);
+}
+
+void* WINAPI glMapBuffer(unsigned target, unsigned access) {
+    Log("[GL] glMapBuffer(target: 0x%X, access: 0x%X)", target, access);
+    return glMapBufferRange(target, 0, 64 * 1024, access);
+}
+
+void WINAPI glGetBufferPointerv(unsigned target, unsigned pname, void** params) {
+    if (!params) return;
+    *params = nullptr;
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    unsigned boundId = g_currentBoundBuffers[target];
+    if (boundId != 0 && pname == 0x888E /*GL_BUFFER_MAP_POINTER*/) {
+        auto it = g_clientBuffers.find(boundId);
+        if (it != g_clientBuffers.end() && !it->second.storage.empty()) {
+            *params = it->second.storage.data();
+        }
+    }
+}
+
+void WINAPI glBindBufferRange(unsigned target, unsigned index, unsigned buffer, ptrdiff_t offset, ptrdiff_t size) {
+    Log("[GL] glBindBufferRange(target: 0x%X, idx: %u, buf: %u, offset: %td, size: %td)", target, index, buffer, offset, size);
+    glBindBuffer(target, buffer);
+}
+
+void WINAPI glBindBufferBase(unsigned target, unsigned index, unsigned buffer) {
+    Log("[GL] glBindBufferBase(target: 0x%X, idx: %u, buf: %u)", target, index, buffer);
+    glBindBuffer(target, buffer);
 }
 
 unsigned WINAPI glCreateShader(unsigned type) {
@@ -790,10 +1571,435 @@ void WINAPI glUseProgram(unsigned program) {
     t_current->session.Append(GLF_UseProgram, &args, sizeof(args));
 }
 
+void WINAPI glValidateProgram(unsigned program) {
+    Log("[GL] glValidateProgram(%u)", program);
+}
+
+void WINAPI glDetachShader(unsigned program, unsigned shader) {
+    Log("[GL] glDetachShader(prog: %u, shader: %u)", program, shader);
+}
+
 void WINAPI glDrawArrays(unsigned mode, int first, int count) {
     if (!t_current || first < 0 || count < 0 || count > 1 << 20) return;
     const GlDrawArraysArgs args = {mode, static_cast<uint32_t>(first), static_cast<uint32_t>(count)};
     t_current->session.Append(GLF_DrawArrays, &args, sizeof(args));
+}
+
+void WINAPI glDrawElements(unsigned mode, int count, unsigned type, const void* indices) {
+    Log("[GL] glDrawElements(mode: 0x%X, count: %d, type: 0x%X, indices: %p)", mode, count, type, indices);
+}
+
+void WINAPI glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, const void* indices, int basevertex) {
+    Log("[GL] glDrawElementsBaseVertex(mode: 0x%X, count: %d, type: 0x%X, indices: %p, basevertex: %d)",
+        mode, count, type, indices, basevertex);
+}
+
+void WINAPI glDrawRangeElements(unsigned mode, unsigned start, unsigned end, int count, unsigned type, const void* indices) {
+    Log("[GL] glDrawRangeElements(mode: 0x%X, start: %u, end: %u, count: %d, type: 0x%X, indices: %p)",
+        mode, start, end, count, type, indices);
+}
+
+void WINAPI glDrawRangeElementsBaseVertex(unsigned mode, unsigned start, unsigned end, int count, unsigned type, const void* indices, int basevertex) {
+    Log("[GL] glDrawRangeElementsBaseVertex(mode: 0x%X, start: %u, end: %u, count: %d, type: 0x%X, indices: %p, basevertex: %d)",
+        mode, start, end, count, type, indices, basevertex);
+}
+
+void WINAPI glMultiDrawElements(unsigned mode, const int* count, unsigned type, const void* const* indices, int drawcount) {
+    Log("[GL] glMultiDrawElements(mode: 0x%X, type: 0x%X, drawcount: %d)", mode, type, drawcount);
+}
+
+void WINAPI glPrimitiveRestartIndex(unsigned index) {
+    Log("[GL] glPrimitiveRestartIndex(%u)", index);
+}
+
+void WINAPI glDrawArraysInstanced(unsigned mode, int first, int count, int instancecount) {
+    Log("[GL] glDrawArraysInstanced(mode: 0x%X, first: %d, count: %d, instances: %d)",
+        mode, first, count, instancecount);
+    if (instancecount > 0) {
+        glDrawArrays(mode, first, count);
+    }
+}
+
+void WINAPI glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void* indices, int instancecount) {
+    Log("[GL] glDrawElementsInstanced(mode: 0x%X, count: %d, type: 0x%X, indices: %p, instances: %d)",
+        mode, count, type, indices, instancecount);
+}
+
+unsigned char WINAPI glIsBuffer(unsigned id) { return id > 0 ? 1 : 0; }
+unsigned char WINAPI glIsTexture(unsigned id) { return id > 0 ? 1 : 0; }
+unsigned char WINAPI glIsFramebuffer(unsigned id) { return id > 0 ? 1 : 0; }
+unsigned char WINAPI glIsRenderbuffer(unsigned id) { return id > 0 ? 1 : 0; }
+unsigned char WINAPI glIsVertexArray(unsigned id) { return id > 0 ? 1 : 0; }
+unsigned char WINAPI glIsProgram(unsigned id) { return id > 0 ? 1 : 0; }
+unsigned char WINAPI glIsShader(unsigned id) { return id > 0 ? 1 : 0; }
+
+
+void WINAPI glBindAttribLocation(unsigned program, unsigned index, const char* name) {
+    Log("[GL] glBindAttribLocation(prog: %u, idx: %u, name: %s)", program, index, name ? name : "null");
+}
+
+void WINAPI glDeleteShader(unsigned shader) {
+    Log("[GL] glDeleteShader(%u)", shader);
+}
+
+void WINAPI glDeleteProgram(unsigned program) {
+    Log("[GL] glDeleteProgram(%u)", program);
+}
+
+void WINAPI glBufferStorage(unsigned target, ptrdiff_t size, const void* data, unsigned flags) {
+    Log("[GL] glBufferStorage(target: 0x%X, size: %td, flags: 0x%X)", target, size, flags);
+    glBufferData(target, size, data, 0x88E4 /*GL_STATIC_DRAW*/);
+}
+
+void WINAPI glCopyBufferSubData(unsigned readTarget, unsigned writeTarget,
+                               ptrdiff_t readOffset, ptrdiff_t writeOffset, ptrdiff_t size) {
+    Log("[GL] glCopyBufferSubData(0x%X->0x%X, %td->%td, size: %td)",
+        readTarget, writeTarget, readOffset, writeOffset, size);
+    if (size <= 0 || readOffset < 0 || writeOffset < 0) return;
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    unsigned readId = g_currentBoundBuffers[readTarget];
+    unsigned writeId = g_currentBoundBuffers[writeTarget];
+    if (readId && writeId && readId != writeId) {
+        auto itRead = g_clientBuffers.find(readId);
+        auto itWrite = g_clientBuffers.find(writeId);
+        if (itRead != g_clientBuffers.end() && itWrite != g_clientBuffers.end()) {
+            if (itRead->second.storage.size() >= static_cast<size_t>(readOffset + size)) {
+                if (itWrite->second.storage.size() < static_cast<size_t>(writeOffset + size)) {
+                    itWrite->second.storage.resize(static_cast<size_t>(writeOffset + size));
+                }
+                std::memcpy(itWrite->second.storage.data() + writeOffset,
+                            itRead->second.storage.data() + readOffset,
+                            static_cast<size_t>(size));
+            }
+        }
+    }
+}
+
+void WINAPI glClearBufferfv(unsigned buffer, int drawbuffer, const float* value) {
+    Log("[GL] glClearBufferfv(buffer: 0x%X, drawbuffer: %d, value: %p)", buffer, drawbuffer, value);
+    if (buffer == 0x1800 /*GL_COLOR*/ && value) {
+        glClearColor(value[0], value[1], value[2], value[3]);
+        glClear(0x4000 /*GL_COLOR_BUFFER_BIT*/);
+    } else if (buffer == 0x1801 /*GL_DEPTH*/ && value) {
+        glClear(0x0100 /*GL_DEPTH_BUFFER_BIT*/);
+    }
+}
+
+void WINAPI glClearBufferiv(unsigned buffer, int drawbuffer, const int* value) {
+    Log("[GL] glClearBufferiv(buffer: 0x%X, drawbuffer: %d, value: %p)", buffer, drawbuffer, value);
+    if (buffer == 0x1802 /*GL_STENCIL*/ && value) {
+        glClearStencil(value[0]);
+        glClear(0x0400 /*GL_STENCIL_BUFFER_BIT*/);
+    }
+}
+
+void WINAPI glClearBufferuiv(unsigned buffer, int drawbuffer, const unsigned* value) {
+    Log("[GL] glClearBufferuiv(buffer: 0x%X, drawbuffer: %d, value: %p)", buffer, drawbuffer, value);
+}
+
+void WINAPI glClearBufferfi(unsigned buffer, int drawbuffer, float depth, int stencil) {
+    Log("[GL] glClearBufferfi(buffer: 0x%X, drawbuffer: %d, depth: %f, stencil: %d)", buffer, drawbuffer, depth, stencil);
+    glClearDepth(depth);
+    glClearStencil(stencil);
+    glClear(0x0100 /*GL_DEPTH_BUFFER_BIT*/ | 0x0400 /*GL_STENCIL_BUFFER_BIT*/);
+}
+
+void WINAPI glClipControl(unsigned origin, unsigned depth) {
+    Log("[GL] glClipControl(origin: 0x%X, depth: 0x%X)", origin, depth);
+}
+
+void WINAPI glDisablei(unsigned cap, unsigned index) {
+    Log("[GL] glDisablei(cap: 0x%X, index: %u)", cap, index);
+}
+
+void WINAPI glEnablei(unsigned cap, unsigned index) {
+    Log("[GL] glEnablei(cap: 0x%X, index: %u)", cap, index);
+}
+
+void WINAPI glLogicOp(unsigned opcode) {
+    Log("[GL] glLogicOp(opcode: 0x%X)", opcode);
+}
+
+void WINAPI glReadBuffer(unsigned mode) {
+    Log("[GL] glReadBuffer(mode: 0x%X)", mode);
+}
+
+void WINAPI glReadPixels(int x, int y, int width, int height, unsigned format, unsigned type, void* pixels) {
+    Log("[GL] glReadPixels(%d, %d, %d, %d, fmt: 0x%X, type: 0x%X, pixels: %p)", x, y, width, height, format, type, pixels);
+    if (pixels && width > 0 && height > 0) {
+        std::memset(pixels, 0, static_cast<size_t>(width) * height * 4);
+    }
+}
+
+void WINAPI glDrawBuffer(unsigned mode) {
+    Log("[GL] glDrawBuffer(mode: 0x%X)", mode);
+}
+
+void WINAPI glDrawArraysIndirect(unsigned mode, const void* indirect) {
+    Log("[GL] glDrawArraysIndirect(mode: 0x%X, indirect: %p)", mode, indirect);
+}
+
+void WINAPI glDrawArraysInstancedBaseInstance(unsigned mode, int first, int count, int instancecount, unsigned baseinstance) {
+    Log("[GL] glDrawArraysInstancedBaseInstance(mode: 0x%X, first: %d, count: %d, instances: %d, base: %u)",
+        mode, first, count, instancecount, baseinstance);
+}
+
+void WINAPI glDrawElementsIndirect(unsigned mode, unsigned type, const void* indirect) {
+    Log("[GL] glDrawElementsIndirect(mode: 0x%X, type: 0x%X, indirect: %p)", mode, type, indirect);
+}
+
+void WINAPI glDrawElementsInstancedBaseVertex(unsigned mode, int count, unsigned type, const void* indices, int instancecount, int basevertex) {
+    Log("[GL] glDrawElementsInstancedBaseVertex(mode: 0x%X, count: %d, type: 0x%X, inst: %d, base: %d)",
+        mode, count, type, instancecount, basevertex);
+}
+
+void WINAPI glDrawElementsInstancedBaseVertexBaseInstance(unsigned mode, int count, unsigned type, const void* indices,
+                                                         int instancecount, int basevertex, unsigned baseinstance) {
+    Log("[GL] glDrawElementsInstancedBaseVertexBaseInstance(mode: 0x%X, count: %d, type: 0x%X, inst: %d, base: %d, baseInst: %u)",
+        mode, count, type, instancecount, basevertex, baseinstance);
+}
+
+void WINAPI glMultiDrawArrays(unsigned mode, const int* first, const int* count, int drawcount) {
+    Log("[GL] glMultiDrawArrays(mode: 0x%X, draws: %d)", mode, drawcount);
+}
+
+void WINAPI glMultiDrawArraysIndirect(unsigned mode, const void* indirect, int drawcount, int stride) {
+    Log("[GL] glMultiDrawArraysIndirect(mode: 0x%X, draws: %d, stride: %d)", mode, drawcount, stride);
+}
+
+void WINAPI glMultiDrawElementsBaseVertex(unsigned mode, const int* count, unsigned type,
+                                         const void* const* indices, int drawcount, const int* basevertex) {
+    Log("[GL] glMultiDrawElementsBaseVertex(mode: 0x%X, draws: %d)", mode, drawcount);
+}
+
+void WINAPI glMultiDrawElementsIndirect(unsigned mode, unsigned type, const void* indirect, int drawcount, int stride) {
+    Log("[GL] glMultiDrawElementsIndirect(mode: 0x%X, draws: %d, stride: %d)", mode, drawcount, stride);
+}
+
+static unsigned g_nextQueryId = 1;
+
+void WINAPI glGenQueries(int n, unsigned* ids) {
+    Log("[GL] glGenQueries(%d)", n);
+    if (!ids || n < 0) return;
+    for (int i = 0; i < n; ++i) ids[i] = g_nextQueryId++;
+}
+
+void WINAPI glDeleteQueries(int n, const unsigned* ids) {
+    Log("[GL] glDeleteQueries(%d)", n);
+}
+
+void WINAPI glBeginQuery(unsigned target, unsigned id) {
+    Log("[GL] glBeginQuery(0x%X, %u)", target, id);
+}
+
+void WINAPI glEndQuery(unsigned target) {
+    Log("[GL] glEndQuery(0x%X)", target);
+}
+
+void WINAPI glGetQueryiv(unsigned target, unsigned pname, int* params) {
+    if (!params) return;
+    if (pname == 0x8865 /*GL_CURRENT_QUERY*/) *params = 0;
+    else if (pname == 0x8864 /*GL_QUERY_COUNTER_BITS*/) *params = 64;
+    else *params = 0;
+}
+
+unsigned char WINAPI glIsQuery(unsigned id) {
+    return id > 0 ? 1 : 0;
+}
+
+void WINAPI glQueryCounter(unsigned id, unsigned target) {
+    Log("[GL] glQueryCounter(id: %u, target: 0x%X)", id, target);
+}
+
+void WINAPI glGetQueryObjectiv(unsigned id, unsigned pname, int* params) {
+    if (!params) return;
+    if (pname == 0x8867 /*GL_QUERY_RESULT_AVAILABLE*/) *params = 1;
+    else if (pname == 0x8866 /*GL_QUERY_RESULT*/) *params = 0;
+    else *params = 0;
+}
+
+void WINAPI glGetQueryObjectuiv(unsigned id, unsigned pname, unsigned* params) {
+    if (!params) return;
+    if (pname == 0x8867 /*GL_QUERY_RESULT_AVAILABLE*/) *params = 1;
+    else if (pname == 0x8866 /*GL_QUERY_RESULT*/) *params = 0;
+    else *params = 0;
+}
+
+void WINAPI glGetQueryObjecti64v(unsigned id, unsigned pname, long long* params) {
+    if (!params) return;
+    if (pname == 0x8867 /*GL_QUERY_RESULT_AVAILABLE*/) *params = 1;
+    else if (pname == 0x8866 /*GL_QUERY_RESULT*/) *params = 0;
+    else *params = 0;
+}
+
+void WINAPI glGetQueryObjectui64v(unsigned id, unsigned pname, unsigned long long* params) {
+    if (!params) return;
+    if (pname == 0x8867 /*GL_QUERY_RESULT_AVAILABLE*/) *params = 1;
+    else if (pname == 0x8866 /*GL_QUERY_RESULT*/) *params = 0;
+    else *params = 0;
+}
+
+void WINAPI glDebugMessageCallback(void* callback, const void* userParam) {
+    Log("[GL] glDebugMessageCallback(%p, %p)", callback, userParam);
+}
+
+void WINAPI glDebugMessageCallbackARB(void* callback, const void* userParam) {
+    Log("[GL] glDebugMessageCallbackARB(%p, %p)", callback, userParam);
+}
+
+void WINAPI glDebugMessageControl(unsigned source, unsigned type, unsigned severity,
+                                  int count, const unsigned* ids, unsigned char enabled) {
+    Log("[GL] glDebugMessageControl(src: 0x%X, type: 0x%X, sev: 0x%X, count: %d, enabled: %u)",
+        source, type, severity, count, enabled);
+}
+
+void WINAPI glDebugMessageControlARB(unsigned source, unsigned type, unsigned severity,
+                                     int count, const unsigned* ids, unsigned char enabled) {
+    Log("[GL] glDebugMessageControlARB(src: 0x%X, type: 0x%X, sev: 0x%X, count: %d, enabled: %u)",
+        source, type, severity, count, enabled);
+}
+
+void WINAPI glObjectLabel(unsigned identifier, unsigned name, int length, const char* label) {
+    Log("[GL] glObjectLabel(id: 0x%X, name: %u, label: %s)", identifier, name, label ? label : "");
+}
+
+void WINAPI glLabelObjectEXT(unsigned type, unsigned object, int length, const char* label) {
+    Log("[GL] glLabelObjectEXT(type: 0x%X, obj: %u, label: %s)", type, object, label ? label : "");
+}
+
+void WINAPI glPushDebugGroup(unsigned source, unsigned id, int length, const char* message) {
+    Log("[GL] glPushDebugGroup(src: 0x%X, id: %u, msg: %s)", source, id, message ? message : "");
+}
+
+void WINAPI glPopDebugGroup() {
+    Log("[GL] glPopDebugGroup()");
+}
+
+void WINAPI glBindVertexBuffer(unsigned bindingindex, unsigned buffer, ptrdiff_t offset, int stride) {
+    Log("[GL] glBindVertexBuffer(idx: %u, buf: %u, off: %td, stride: %d)", bindingindex, buffer, offset, stride);
+}
+
+void WINAPI glVertexAttribBinding(unsigned attribindex, unsigned bindingindex) {
+    Log("[GL] glVertexAttribBinding(attrib: %u, binding: %u)", attribindex, bindingindex);
+}
+
+void WINAPI glVertexAttribFormat(unsigned attribindex, int size, unsigned type, unsigned char normalized, unsigned relativeoffset) {
+    Log("[GL] glVertexAttribFormat(attrib: %u, size: %d, type: 0x%X, norm: %u, off: %u)", attribindex, size, type, normalized, relativeoffset);
+}
+
+void WINAPI glVertexAttribIFormat(unsigned attribindex, int size, unsigned type, unsigned relativeoffset) {
+    Log("[GL] glVertexAttribIFormat(attrib: %u, size: %d, type: 0x%X, off: %u)", attribindex, size, type, relativeoffset);
+}
+
+void WINAPI glVertexBindingDivisor(unsigned bindingindex, unsigned divisor) {
+    Log("[GL] glVertexBindingDivisor(binding: %u, divisor: %u)", bindingindex, divisor);
+}
+
+void WINAPI glTexBuffer(unsigned target, unsigned internalformat, unsigned buffer) {
+    Log("[GL] glTexBuffer(target: 0x%X, internalformat: 0x%X, buffer: %u)", target, internalformat, buffer);
+}
+
+void WINAPI glCreateBuffers(int n, unsigned* buffers) {
+    Log("[GL] glCreateBuffers(%d)", n);
+    glGenBuffers(n, buffers);
+}
+
+void WINAPI glNamedBufferData(unsigned buffer, ptrdiff_t size, const void* data, unsigned usage) {
+    Log("[GL] glNamedBufferData(buf: %u, size: %td, usage: 0x%X)", buffer, size, usage);
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    auto& buf = g_clientBuffers[buffer];
+    buf.storage.resize(size > 0 ? static_cast<size_t>(size) : 0);
+    if (data && size > 0) {
+        std::memcpy(buf.storage.data(), data, static_cast<size_t>(size));
+    }
+}
+
+void WINAPI glNamedBufferSubData(unsigned buffer, ptrdiff_t offset, ptrdiff_t size, const void* data) {
+    Log("[GL] glNamedBufferSubData(buf: %u, off: %td, size: %td)", buffer, offset, size);
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    auto& buf = g_clientBuffers[buffer];
+    if (offset >= 0 && size > 0 && data) {
+        if (buf.storage.size() < static_cast<size_t>(offset + size)) {
+            buf.storage.resize(static_cast<size_t>(offset + size));
+        }
+        std::memcpy(buf.storage.data() + offset, data, static_cast<size_t>(size));
+    }
+}
+
+void WINAPI glNamedBufferStorage(unsigned buffer, ptrdiff_t size, const void* data, unsigned flags) {
+    Log("[GL] glNamedBufferStorage(buf: %u, size: %td, flags: 0x%X)", buffer, size, flags);
+    glNamedBufferData(buffer, size, data, 0x88E4 /*GL_STATIC_DRAW*/);
+}
+
+void WINAPI glCopyNamedBufferSubData(unsigned readBuffer, unsigned writeBuffer,
+                                    ptrdiff_t readOffset, ptrdiff_t writeOffset, ptrdiff_t size) {
+    Log("[GL] glCopyNamedBufferSubData(%u->%u, %td->%td, size: %td)",
+        readBuffer, writeBuffer, readOffset, writeOffset, size);
+    if (size <= 0 || readOffset < 0 || writeOffset < 0) return;
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    auto itRead = g_clientBuffers.find(readBuffer);
+    auto itWrite = g_clientBuffers.find(writeBuffer);
+    if (itRead != g_clientBuffers.end() && itWrite != g_clientBuffers.end()) {
+        if (itRead->second.storage.size() >= static_cast<size_t>(readOffset + size)) {
+            if (itWrite->second.storage.size() < static_cast<size_t>(writeOffset + size)) {
+                itWrite->second.storage.resize(static_cast<size_t>(writeOffset + size));
+            }
+            std::memcpy(itWrite->second.storage.data() + writeOffset,
+                        itRead->second.storage.data() + readOffset,
+                        static_cast<size_t>(size));
+        }
+    }
+}
+
+void* WINAPI glMapNamedBufferRange(unsigned buffer, ptrdiff_t offset, ptrdiff_t length, unsigned access) {
+    Log("[GL] glMapNamedBufferRange(buf: %u, off: %td, len: %td, access: 0x%X)", buffer, offset, length, access);
+    std::lock_guard<std::mutex> lock(g_bufferMutex);
+    auto& buf = g_clientBuffers[buffer];
+    if (offset < 0 || length < 0) return nullptr;
+    if (buf.storage.size() < static_cast<size_t>(offset + length)) {
+        buf.storage.resize(static_cast<size_t>(offset + length));
+    }
+    return buf.storage.data() + offset;
+}
+
+unsigned char WINAPI glUnmapNamedBuffer(unsigned buffer) {
+    Log("[GL] glUnmapNamedBuffer(buf: %u)", buffer);
+    std::vector<uint8_t> fullBufferCopy;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        auto it = g_clientBuffers.find(buffer);
+        if (it != g_clientBuffers.end()) {
+            fullBufferCopy = it->second.storage;
+        }
+    }
+    if (!fullBufferCopy.empty() && t_current && fullBufferCopy.size() <= 64 * 1024 * 1024) {
+        const GlBufferDataArgs args = {0x8892 /*GL_ARRAY_BUFFER*/, 0x88E4 /*GL_STATIC_DRAW*/, static_cast<uint64_t>(fullBufferCopy.size())};
+        std::vector<uint8_t> payload(sizeof(args) + fullBufferCopy.size());
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), fullBufferCopy.data(), fullBufferCopy.size());
+        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+    return 1;
+}
+
+void WINAPI glFlushMappedNamedBufferRange(unsigned buffer, ptrdiff_t offset, ptrdiff_t length) {
+    Log("[GL] glFlushMappedNamedBufferRange(buf: %u, off: %td, len: %td)", buffer, offset, length);
+}
+
+void WINAPI glCreateFramebuffers(int n, unsigned* framebuffers) {
+    Log("[GL] glCreateFramebuffers(%d)", n);
+    glGenFramebuffers(n, framebuffers);
+}
+
+void WINAPI glNamedFramebufferTexture(unsigned framebuffer, unsigned attachment, unsigned texture, int level) {
+    Log("[GL] glNamedFramebufferTexture(fb: %u, attach: 0x%X, tex: %u, lvl: %d)", framebuffer, attachment, texture, level);
+}
+
+void WINAPI glBlitNamedFramebuffer(unsigned readFramebuffer, unsigned drawFramebuffer,
+                                   int srcX0, int srcY0, int srcX1, int srcY1,
+                                   int dstX0, int dstY0, int dstX1, int dstY1,
+                                   unsigned mask, unsigned filter) {
+    Log("[GL] glBlitNamedFramebuffer(%u->%u, mask: 0x%X)", readFramebuffer, drawFramebuffer, mask);
 }
 
 // --- Dispatch Table for wglGetProcAddress -------------------------------------------------------
@@ -816,21 +2022,40 @@ PROC WINAPI wglGetProcAddress(LPCSTR name) {
         {"glGetStringi", reinterpret_cast<PROC>(glGetStringi)},
         {"glGetIntegerv", reinterpret_cast<PROC>(glGetIntegerv)},
         {"glGetFloatv", reinterpret_cast<PROC>(glGetFloatv)},
+        {"glGetDoublev", reinterpret_cast<PROC>(glGetDoublev)},
         {"glGetInteger64v", reinterpret_cast<PROC>(glGetInteger64v)},
         {"glGetInternalformativ", reinterpret_cast<PROC>(glGetInternalformativ)},
         {"glGetTexLevelParameteriv", reinterpret_cast<PROC>(glGetTexLevelParameteriv)},
         {"glPixelStorei", reinterpret_cast<PROC>(glPixelStorei)},
         {"glGetIntegeri_v", reinterpret_cast<PROC>(glGetIntegeri_v)},
+        {"glGetBufferParameteriv", reinterpret_cast<PROC>(glGetBufferParameteriv)},
         {"glGetBufferParameteri64v", reinterpret_cast<PROC>(glGetBufferParameteri64v)},
         {"glGetVertexAttribiv", reinterpret_cast<PROC>(glGetVertexAttribiv)},
         {"glGetUniformiv", reinterpret_cast<PROC>(glGetUniformiv)},
         {"glGetUniformfv", reinterpret_cast<PROC>(glGetUniformfv)},
         {"glBindFramebuffer", reinterpret_cast<PROC>(glBindFramebuffer)},
+        {"glBindFramebufferEXT", reinterpret_cast<PROC>(glBindFramebuffer)},
         {"glBindRenderbuffer", reinterpret_cast<PROC>(glBindRenderbuffer)},
+        {"glBindRenderbufferEXT", reinterpret_cast<PROC>(glBindRenderbuffer)},
         {"glFramebufferTexture2D", reinterpret_cast<PROC>(glFramebufferTexture2D)},
+        {"glFramebufferTexture2DEXT", reinterpret_cast<PROC>(glFramebufferTexture2D)},
         {"glFramebufferRenderbuffer", reinterpret_cast<PROC>(glFramebufferRenderbuffer)},
+        {"glFramebufferRenderbufferEXT", reinterpret_cast<PROC>(glFramebufferRenderbuffer)},
         {"glGenFramebuffers", reinterpret_cast<PROC>(glGenFramebuffers)},
+        {"glGenFramebuffersEXT", reinterpret_cast<PROC>(glGenFramebuffers)},
         {"glDeleteFramebuffers", reinterpret_cast<PROC>(glDeleteFramebuffers)},
+        {"glDeleteFramebuffersEXT", reinterpret_cast<PROC>(glDeleteFramebuffers)},
+        {"glGenRenderbuffers", reinterpret_cast<PROC>(glGenRenderbuffers)},
+        {"glGenRenderbuffersEXT", reinterpret_cast<PROC>(glGenRenderbuffers)},
+        {"glDeleteRenderbuffers", reinterpret_cast<PROC>(glDeleteRenderbuffers)},
+        {"glDeleteRenderbuffersEXT", reinterpret_cast<PROC>(glDeleteRenderbuffers)},
+        {"glRenderbufferStorage", reinterpret_cast<PROC>(glRenderbufferStorage)},
+        {"glRenderbufferStorageEXT", reinterpret_cast<PROC>(glRenderbufferStorage)},
+        {"glRenderbufferStorageMultisample", reinterpret_cast<PROC>(glRenderbufferStorageMultisample)},
+        {"glBlitFramebuffer", reinterpret_cast<PROC>(glBlitFramebuffer)},
+        {"glBlitFramebufferEXT", reinterpret_cast<PROC>(glBlitFramebuffer)},
+        {"glDrawBuffers", reinterpret_cast<PROC>(glDrawBuffers)},
+        {"glDrawBuffersARB", reinterpret_cast<PROC>(glDrawBuffers)},
         {"glGetBooleanv", reinterpret_cast<PROC>(glGetBooleanv)},
         {"glGetError", reinterpret_cast<PROC>(glGetError)},
         {"glGetAttachedShaders", reinterpret_cast<PROC>(glGetAttachedShaders)},
@@ -838,7 +2063,6 @@ PROC WINAPI wglGetProcAddress(LPCSTR name) {
         {"glGetActiveUniform", reinterpret_cast<PROC>(glGetActiveUniform)},
         {"glGetShaderSource", reinterpret_cast<PROC>(glGetShaderSource)},
         {"glGetUniformLocationARB", reinterpret_cast<PROC>(glGetUniformLocationARB)},
-        {"glGetDoublev", reinterpret_cast<PROC>(glGetDoublev)},
         {"glEnable", reinterpret_cast<PROC>(glEnable)},
         {"glDisable", reinterpret_cast<PROC>(glDisable)},
         {"glIsEnabled", reinterpret_cast<PROC>(glIsEnabled)},
@@ -848,10 +2072,40 @@ PROC WINAPI wglGetProcAddress(LPCSTR name) {
         {"glFlush", reinterpret_cast<PROC>(glFlush)},
         {"glFinish", reinterpret_cast<PROC>(glFinish)},
         {"glDrawArrays", reinterpret_cast<PROC>(glDrawArrays)},
+        {"glDrawElements", reinterpret_cast<PROC>(glDrawElements)},
+        {"glDrawElementsBaseVertex", reinterpret_cast<PROC>(glDrawElementsBaseVertex)},
+        {"glDrawRangeElements", reinterpret_cast<PROC>(glDrawRangeElements)},
+        {"glDrawArraysInstanced", reinterpret_cast<PROC>(glDrawArraysInstanced)},
+        {"glDrawArraysInstancedARB", reinterpret_cast<PROC>(glDrawArraysInstanced)},
+        {"glDrawElementsInstanced", reinterpret_cast<PROC>(glDrawElementsInstanced)},
+        {"glDrawElementsInstancedARB", reinterpret_cast<PROC>(glDrawElementsInstanced)},
         {"glGenBuffers", reinterpret_cast<PROC>(glGenBuffers)},
+        {"glGenBuffersARB", reinterpret_cast<PROC>(glGenBuffers)},
         {"glBindBuffer", reinterpret_cast<PROC>(glBindBuffer)},
+        {"glBindBufferARB", reinterpret_cast<PROC>(glBindBuffer)},
         {"glBufferData", reinterpret_cast<PROC>(glBufferData)},
+        {"glBufferDataARB", reinterpret_cast<PROC>(glBufferData)},
+        {"glBufferSubData", reinterpret_cast<PROC>(glBufferSubData)},
+        {"glBufferSubDataARB", reinterpret_cast<PROC>(glBufferSubData)},
+        {"glGetBufferSubData", reinterpret_cast<PROC>(glGetBufferSubData)},
+        {"glGetBufferSubDataARB", reinterpret_cast<PROC>(glGetBufferSubData)},
         {"glDeleteBuffers", reinterpret_cast<PROC>(glDeleteBuffers)},
+        {"glDeleteBuffersARB", reinterpret_cast<PROC>(glDeleteBuffers)},
+        {"glMapBuffer", reinterpret_cast<PROC>(glMapBuffer)},
+        {"glMapBufferARB", reinterpret_cast<PROC>(glMapBuffer)},
+        {"glMapBufferRange", reinterpret_cast<PROC>(glMapBufferRange)},
+        {"glUnmapBuffer", reinterpret_cast<PROC>(glUnmapBuffer)},
+        {"glUnmapBufferARB", reinterpret_cast<PROC>(glUnmapBuffer)},
+        {"glFlushMappedBufferRange", reinterpret_cast<PROC>(glFlushMappedBufferRange)},
+        {"glBindBufferRange", reinterpret_cast<PROC>(glBindBufferRange)},
+        {"glBindBufferBase", reinterpret_cast<PROC>(glBindBufferBase)},
+        {"glUniformBlockBinding", reinterpret_cast<PROC>(glUniformBlockBinding)},
+        {"glGetUniformBlockIndex", reinterpret_cast<PROC>(glGetUniformBlockIndex)},
+        {"glFenceSync", reinterpret_cast<PROC>(glFenceSync)},
+        {"glClientWaitSync", reinterpret_cast<PROC>(glClientWaitSync)},
+        {"glWaitSync", reinterpret_cast<PROC>(glWaitSync)},
+        {"glDeleteSync", reinterpret_cast<PROC>(glDeleteSync)},
+        {"glIsSync", reinterpret_cast<PROC>(glIsSync)},
         {"glCreateShader", reinterpret_cast<PROC>(glCreateShader)},
         {"glCreateProgram", reinterpret_cast<PROC>(glCreateProgram)},
         {"glShaderSource", reinterpret_cast<PROC>(glShaderSource)},
@@ -863,25 +2117,278 @@ PROC WINAPI wglGetProcAddress(LPCSTR name) {
         {"glBindTexture", reinterpret_cast<PROC>(glBindTexture)},
         {"glDeleteTextures", reinterpret_cast<PROC>(glDeleteTextures)},
         {"glTexParameteri", reinterpret_cast<PROC>(glTexParameteri)},
+        {"glTexParameterf", reinterpret_cast<PROC>(glTexParameterf)},
+        {"glTexParameteriv", reinterpret_cast<PROC>(glTexParameteriv)},
+        {"glTexParameterfv", reinterpret_cast<PROC>(glTexParameterfv)},
+        {"glGetTexParameteriv", reinterpret_cast<PROC>(glGetTexParameteriv)},
+        {"glGetTexParameterfv", reinterpret_cast<PROC>(glGetTexParameterfv)},
+        {"glTexImage1D", reinterpret_cast<PROC>(glTexImage1D)},
         {"glTexImage2D", reinterpret_cast<PROC>(glTexImage2D)},
+        {"glTexImage3D", reinterpret_cast<PROC>(glTexImage3D)},
+        {"glTexSubImage1D", reinterpret_cast<PROC>(glTexSubImage1D)},
+        {"glTexSubImage2D", reinterpret_cast<PROC>(glTexSubImage2D)},
+        {"glTexSubImage3D", reinterpret_cast<PROC>(glTexSubImage3D)},
+        {"glTexSubImage3DEXT", reinterpret_cast<PROC>(glTexSubImage3D)},
+        {"glCopyTexSubImage2D", reinterpret_cast<PROC>(glCopyTexSubImage2D)},
+        {"glGenerateMipmap", reinterpret_cast<PROC>(glGenerateMipmap)},
+        {"glGenerateMipmapEXT", reinterpret_cast<PROC>(glGenerateMipmap)},
         {"glActiveTexture", reinterpret_cast<PROC>(glActiveTexture)},
+        {"glActiveTextureARB", reinterpret_cast<PROC>(glActiveTexture)},
+        {"glClientActiveTexture", reinterpret_cast<PROC>(glClientActiveTexture)},
+        {"glClientActiveTextureARB", reinterpret_cast<PROC>(glClientActiveTexture)},
         {"glGenVertexArrays", reinterpret_cast<PROC>(glGenVertexArrays)},
         {"glBindVertexArray", reinterpret_cast<PROC>(glBindVertexArray)},
         {"glDeleteVertexArrays", reinterpret_cast<PROC>(glDeleteVertexArrays)},
         {"glVertexAttribPointer", reinterpret_cast<PROC>(glVertexAttribPointer)},
+        {"glVertexAttribIPointer", reinterpret_cast<PROC>(glVertexAttribIPointer)},
+        {"glVertexAttribDivisor", reinterpret_cast<PROC>(glVertexAttribDivisor)},
         {"glEnableVertexAttribArray", reinterpret_cast<PROC>(glEnableVertexAttribArray)},
         {"glDisableVertexAttribArray", reinterpret_cast<PROC>(glDisableVertexAttribArray)},
         {"glGetUniformLocation", reinterpret_cast<PROC>(glGetUniformLocation)},
         {"glGetAttribLocation", reinterpret_cast<PROC>(glGetAttribLocation)},
+        {"glUniform1i", reinterpret_cast<PROC>(glUniform1i)},
+        {"glUniform1iARB", reinterpret_cast<PROC>(glUniform1i)},
+        {"glUniform1iv", reinterpret_cast<PROC>(glUniform1iv)},
+        {"glUniform1ivARB", reinterpret_cast<PROC>(glUniform1iv)},
+        {"glUniform1f", reinterpret_cast<PROC>(glUniform1f)},
+        {"glUniform1fARB", reinterpret_cast<PROC>(glUniform1f)},
+        {"glUniform1fv", reinterpret_cast<PROC>(glUniform1fv)},
+        {"glUniform1fvARB", reinterpret_cast<PROC>(glUniform1fv)},
+        {"glUniform2f", reinterpret_cast<PROC>(glUniform2f)},
+        {"glUniform2fARB", reinterpret_cast<PROC>(glUniform2f)},
+        {"glUniform2fv", reinterpret_cast<PROC>(glUniform2fv)},
+        {"glUniform2fvARB", reinterpret_cast<PROC>(glUniform2fv)},
+        {"glUniform3f", reinterpret_cast<PROC>(glUniform3f)},
+        {"glUniform3fARB", reinterpret_cast<PROC>(glUniform3f)},
+        {"glUniform3fv", reinterpret_cast<PROC>(glUniform3fv)},
+        {"glUniform3fvARB", reinterpret_cast<PROC>(glUniform3fv)},
+        {"glUniform4f", reinterpret_cast<PROC>(glUniform4f)},
+        {"glUniform4fARB", reinterpret_cast<PROC>(glUniform4f)},
+        {"glUniform4fv", reinterpret_cast<PROC>(glUniform4fv)},
+        {"glUniform4fvARB", reinterpret_cast<PROC>(glUniform4fv)},
+        {"glUniformMatrix2fv", reinterpret_cast<PROC>(glUniformMatrix2fv)},
+        {"glUniformMatrix2fvARB", reinterpret_cast<PROC>(glUniformMatrix2fv)},
+        {"glUniformMatrix3fv", reinterpret_cast<PROC>(glUniformMatrix3fv)},
+        {"glUniformMatrix3fvARB", reinterpret_cast<PROC>(glUniformMatrix3fv)},
+        {"glUniformMatrix4fv", reinterpret_cast<PROC>(glUniformMatrix4fv)},
+        {"glUniformMatrix4fvARB", reinterpret_cast<PROC>(glUniformMatrix4fv)},
         {"glGetShaderiv", reinterpret_cast<PROC>(glGetShaderiv)},
         {"glGetProgramiv", reinterpret_cast<PROC>(glGetProgramiv)},
         {"glGetShaderInfoLog", reinterpret_cast<PROC>(glGetShaderInfoLog)},
         {"glGetProgramInfoLog", reinterpret_cast<PROC>(glGetProgramInfoLog)},
         {"glCheckFramebufferStatus", reinterpret_cast<PROC>(glCheckFramebufferStatus)},
+        {"glCheckFramebufferStatusEXT", reinterpret_cast<PROC>(glCheckFramebufferStatus)},
         {"glBlendFunc", reinterpret_cast<PROC>(glBlendFunc)},
+        {"glBlendFuncSeparate", reinterpret_cast<PROC>(glBlendFuncSeparate)},
+        {"glBlendFuncSeparateEXT", reinterpret_cast<PROC>(glBlendFuncSeparate)},
+        {"glBlendFuncSeparateARB", reinterpret_cast<PROC>(glBlendFuncSeparate)},
+        {"glBlendEquation", reinterpret_cast<PROC>(glBlendEquation)},
+        {"glBlendEquationEXT", reinterpret_cast<PROC>(glBlendEquation)},
+        {"glBlendEquationARB", reinterpret_cast<PROC>(glBlendEquation)},
+        {"glBlendEquationSeparate", reinterpret_cast<PROC>(glBlendEquationSeparate)},
+        {"glBlendEquationSeparateEXT", reinterpret_cast<PROC>(glBlendEquationSeparate)},
+        {"glBlendEquationSeparateARB", reinterpret_cast<PROC>(glBlendEquationSeparate)},
         {"glDepthFunc", reinterpret_cast<PROC>(glDepthFunc)},
         {"glDepthMask", reinterpret_cast<PROC>(glDepthMask)},
+        {"glDepthRange", reinterpret_cast<PROC>(glDepthRange)},
+        {"glDepthRangef", reinterpret_cast<PROC>(glDepthRangef)},
         {"glCullFace", reinterpret_cast<PROC>(glCullFace)},
+        {"glScissor", reinterpret_cast<PROC>(glScissor)},
+        {"glColorMask", reinterpret_cast<PROC>(glColorMask)},
+        {"glColorMaski", reinterpret_cast<PROC>(glColorMaski)},
+        {"glClearDepth", reinterpret_cast<PROC>(glClearDepth)},
+        {"glClearDepthf", reinterpret_cast<PROC>(glClearDepthf)},
+        {"glClearStencil", reinterpret_cast<PROC>(glClearStencil)},
+        {"glPolygonMode", reinterpret_cast<PROC>(glPolygonMode)},
+        {"glPolygonOffset", reinterpret_cast<PROC>(glPolygonOffset)},
+        {"glGenSamplers", reinterpret_cast<PROC>(glGenSamplers)},
+        {"glDeleteSamplers", reinterpret_cast<PROC>(glDeleteSamplers)},
+        {"glIsSampler", reinterpret_cast<PROC>(glIsSampler)},
+        {"glBindSampler", reinterpret_cast<PROC>(glBindSampler)},
+        {"glSamplerParameteri", reinterpret_cast<PROC>(glSamplerParameteri)},
+        {"glSamplerParameterf", reinterpret_cast<PROC>(glSamplerParameterf)},
+        {"glSamplerParameteriv", reinterpret_cast<PROC>(glSamplerParameteriv)},
+        {"glSamplerParameterfv", reinterpret_cast<PROC>(glSamplerParameterfv)},
+        {"glGetSamplerParameteriv", reinterpret_cast<PROC>(glGetSamplerParameteriv)},
+        {"glGetSamplerParameterfv", reinterpret_cast<PROC>(glGetSamplerParameterfv)},
+        {"glIsBuffer", reinterpret_cast<PROC>(glIsBuffer)},
+        {"glIsTexture", reinterpret_cast<PROC>(glIsTexture)},
+        {"glIsFramebuffer", reinterpret_cast<PROC>(glIsFramebuffer)},
+        {"glIsRenderbuffer", reinterpret_cast<PROC>(glIsRenderbuffer)},
+        {"glIsVertexArray", reinterpret_cast<PROC>(glIsVertexArray)},
+        {"glIsProgram", reinterpret_cast<PROC>(glIsProgram)},
+        {"glIsShader", reinterpret_cast<PROC>(glIsShader)},
+        {"glBindAttribLocation", reinterpret_cast<PROC>(glBindAttribLocation)},
+        {"glBindAttribLocationARB", reinterpret_cast<PROC>(glBindAttribLocation)},
+        {"glDeleteShader", reinterpret_cast<PROC>(glDeleteShader)},
+        {"glDeleteProgram", reinterpret_cast<PROC>(glDeleteProgram)},
+        {"glBufferStorage", reinterpret_cast<PROC>(glBufferStorage)},
+        {"glCopyBufferSubData", reinterpret_cast<PROC>(glCopyBufferSubData)},
+        {"glClearBufferfv", reinterpret_cast<PROC>(glClearBufferfv)},
+        {"glClipControl", reinterpret_cast<PROC>(glClipControl)},
+        {"glDisablei", reinterpret_cast<PROC>(glDisablei)},
+        {"glEnablei", reinterpret_cast<PROC>(glEnablei)},
+        {"glLogicOp", reinterpret_cast<PROC>(glLogicOp)},
+        {"glReadBuffer", reinterpret_cast<PROC>(glReadBuffer)},
+        {"glReadPixels", reinterpret_cast<PROC>(glReadPixels)},
+        {"glDrawBuffer", reinterpret_cast<PROC>(glDrawBuffer)},
+        {"glDrawArraysIndirect", reinterpret_cast<PROC>(glDrawArraysIndirect)},
+        {"glDrawArraysInstancedBaseInstance", reinterpret_cast<PROC>(glDrawArraysInstancedBaseInstance)},
+        {"glDrawElementsIndirect", reinterpret_cast<PROC>(glDrawElementsIndirect)},
+        {"glDrawElementsInstancedBaseVertex", reinterpret_cast<PROC>(glDrawElementsInstancedBaseVertex)},
+        {"glDrawElementsInstancedBaseVertexBaseInstance", reinterpret_cast<PROC>(glDrawElementsInstancedBaseVertexBaseInstance)},
+        {"glMultiDrawArrays", reinterpret_cast<PROC>(glMultiDrawArrays)},
+        {"glMultiDrawArraysIndirect", reinterpret_cast<PROC>(glMultiDrawArraysIndirect)},
+        {"glMultiDrawElementsBaseVertex", reinterpret_cast<PROC>(glMultiDrawElementsBaseVertex)},
+        {"glMultiDrawElementsIndirect", reinterpret_cast<PROC>(glMultiDrawElementsIndirect)},
+        {"glGenQueries", reinterpret_cast<PROC>(glGenQueries)},
+        {"glGenQueriesARB", reinterpret_cast<PROC>(glGenQueries)},
+        {"glDeleteQueries", reinterpret_cast<PROC>(glDeleteQueries)},
+        {"glDeleteQueriesARB", reinterpret_cast<PROC>(glDeleteQueries)},
+        {"glQueryCounter", reinterpret_cast<PROC>(glQueryCounter)},
+        {"glGetQueryObjectiv", reinterpret_cast<PROC>(glGetQueryObjectiv)},
+        {"glGetQueryObjectivARB", reinterpret_cast<PROC>(glGetQueryObjectiv)},
+        {"glGetQueryObjectuiv", reinterpret_cast<PROC>(glGetQueryObjectuiv)},
+        {"glGetQueryObjectuivARB", reinterpret_cast<PROC>(glGetQueryObjectuiv)},
+        {"glGetQueryObjecti64v", reinterpret_cast<PROC>(glGetQueryObjecti64v)},
+        {"glGetQueryObjectui64v", reinterpret_cast<PROC>(glGetQueryObjectui64v)},
+        {"glDebugMessageCallback", reinterpret_cast<PROC>(glDebugMessageCallback)},
+        {"glDebugMessageCallbackARB", reinterpret_cast<PROC>(glDebugMessageCallbackARB)},
+        {"glDebugMessageControl", reinterpret_cast<PROC>(glDebugMessageControl)},
+        {"glDebugMessageControlARB", reinterpret_cast<PROC>(glDebugMessageControlARB)},
+        {"glObjectLabel", reinterpret_cast<PROC>(glObjectLabel)},
+        {"glLabelObjectEXT", reinterpret_cast<PROC>(glLabelObjectEXT)},
+        {"glPushDebugGroup", reinterpret_cast<PROC>(glPushDebugGroup)},
+        {"glPopDebugGroup", reinterpret_cast<PROC>(glPopDebugGroup)},
+        {"glBindVertexBuffer", reinterpret_cast<PROC>(glBindVertexBuffer)},
+        {"glVertexAttribBinding", reinterpret_cast<PROC>(glVertexAttribBinding)},
+        {"glVertexAttribFormat", reinterpret_cast<PROC>(glVertexAttribFormat)},
+        {"glVertexAttribIFormat", reinterpret_cast<PROC>(glVertexAttribIFormat)},
+        {"glVertexBindingDivisor", reinterpret_cast<PROC>(glVertexBindingDivisor)},
+        {"glTexBuffer", reinterpret_cast<PROC>(glTexBuffer)},
+        {"glTexBufferARB", reinterpret_cast<PROC>(glTexBuffer)},
+        {"glCreateBuffers", reinterpret_cast<PROC>(glCreateBuffers)},
+        {"glNamedBufferData", reinterpret_cast<PROC>(glNamedBufferData)},
+        {"glNamedBufferDataEXT", reinterpret_cast<PROC>(glNamedBufferData)},
+        {"glNamedBufferSubData", reinterpret_cast<PROC>(glNamedBufferSubData)},
+        {"glNamedBufferSubDataEXT", reinterpret_cast<PROC>(glNamedBufferSubData)},
+        {"glNamedBufferStorage", reinterpret_cast<PROC>(glNamedBufferStorage)},
+        {"glCopyNamedBufferSubData", reinterpret_cast<PROC>(glCopyNamedBufferSubData)},
+        {"glMapNamedBufferRange", reinterpret_cast<PROC>(glMapNamedBufferRange)},
+        {"glMapNamedBufferRangeEXT", reinterpret_cast<PROC>(glMapNamedBufferRange)},
+        {"glUnmapNamedBuffer", reinterpret_cast<PROC>(glUnmapNamedBuffer)},
+        {"glUnmapNamedBufferEXT", reinterpret_cast<PROC>(glUnmapNamedBuffer)},
+        {"glFlushMappedNamedBufferRange", reinterpret_cast<PROC>(glFlushMappedNamedBufferRange)},
+        {"glFlushMappedNamedBufferRangeEXT", reinterpret_cast<PROC>(glFlushMappedNamedBufferRange)},
+        {"glCreateFramebuffers", reinterpret_cast<PROC>(glCreateFramebuffers)},
+        {"glNamedFramebufferTexture", reinterpret_cast<PROC>(glNamedFramebufferTexture)},
+        {"glNamedFramebufferTextureEXT", reinterpret_cast<PROC>(glNamedFramebufferTexture)},
+        {"glBlitNamedFramebuffer", reinterpret_cast<PROC>(glBlitNamedFramebuffer)},
+        {"glFramebufferTextureLayer", reinterpret_cast<PROC>(glFramebufferTextureLayer)},
+        {"glFramebufferTextureLayerARB", reinterpret_cast<PROC>(glFramebufferTextureLayer)},
+        {"glFramebufferTextureLayerEXT", reinterpret_cast<PROC>(glFramebufferTextureLayer)},
+        {"glFramebufferTexture", reinterpret_cast<PROC>(glFramebufferTexture)},
+        {"glFramebufferTexture1D", reinterpret_cast<PROC>(glFramebufferTexture1D)},
+        {"glFramebufferTexture3D", reinterpret_cast<PROC>(glFramebufferTexture3D)},
+        {"glGetFramebufferAttachmentParameteriv", reinterpret_cast<PROC>(glGetFramebufferAttachmentParameteriv)},
+        {"glGetFramebufferAttachmentParameterivEXT", reinterpret_cast<PROC>(glGetFramebufferAttachmentParameteriv)},
+        {"glGetRenderbufferParameteriv", reinterpret_cast<PROC>(glGetRenderbufferParameteriv)},
+        {"glGetRenderbufferParameterivEXT", reinterpret_cast<PROC>(glGetRenderbufferParameteriv)},
+        {"glBindFragDataLocation", reinterpret_cast<PROC>(glBindFragDataLocation)},
+        {"glBindFragDataLocationEXT", reinterpret_cast<PROC>(glBindFragDataLocation)},
+        {"glGetFragDataLocation", reinterpret_cast<PROC>(glGetFragDataLocation)},
+        {"glGetFragDataLocationEXT", reinterpret_cast<PROC>(glGetFragDataLocation)},
+        {"glCopyTexImage1D", reinterpret_cast<PROC>(glCopyTexImage1D)},
+        {"glCopyTexImage2D", reinterpret_cast<PROC>(glCopyTexImage2D)},
+        {"glCopyTexSubImage1D", reinterpret_cast<PROC>(glCopyTexSubImage1D)},
+        {"glCopyTexSubImage3D", reinterpret_cast<PROC>(glCopyTexSubImage3D)},
+        {"glPixelStoref", reinterpret_cast<PROC>(glPixelStoref)},
+        {"glGetTexLevelParameterfv", reinterpret_cast<PROC>(glGetTexLevelParameterfv)},
+        {"glTexParameterIiv", reinterpret_cast<PROC>(glTexParameterIiv)},
+        {"glTexParameterIivEXT", reinterpret_cast<PROC>(glTexParameterIiv)},
+        {"glTexParameterIuiv", reinterpret_cast<PROC>(glTexParameterIuiv)},
+        {"glTexParameterIuivEXT", reinterpret_cast<PROC>(glTexParameterIuiv)},
+        {"glGetTexParameterIiv", reinterpret_cast<PROC>(glGetTexParameterIiv)},
+        {"glGetTexParameterIivEXT", reinterpret_cast<PROC>(glGetTexParameterIiv)},
+        {"glGetTexParameterIuiv", reinterpret_cast<PROC>(glGetTexParameterIuiv)},
+        {"glGetTexParameterIuivEXT", reinterpret_cast<PROC>(glGetTexParameterIuiv)},
+        {"glUniform2i", reinterpret_cast<PROC>(glUniform2i)},
+        {"glUniform2iARB", reinterpret_cast<PROC>(glUniform2i)},
+        {"glUniform3i", reinterpret_cast<PROC>(glUniform3i)},
+        {"glUniform3iARB", reinterpret_cast<PROC>(glUniform3i)},
+        {"glUniform4i", reinterpret_cast<PROC>(glUniform4i)},
+        {"glUniform4iARB", reinterpret_cast<PROC>(glUniform4i)},
+        {"glUniform2iv", reinterpret_cast<PROC>(glUniform2iv)},
+        {"glUniform2ivARB", reinterpret_cast<PROC>(glUniform2iv)},
+        {"glUniform3iv", reinterpret_cast<PROC>(glUniform3iv)},
+        {"glUniform3ivARB", reinterpret_cast<PROC>(glUniform3iv)},
+        {"glUniform4iv", reinterpret_cast<PROC>(glUniform4iv)},
+        {"glUniform4ivARB", reinterpret_cast<PROC>(glUniform4iv)},
+        {"glUniform1ui", reinterpret_cast<PROC>(glUniform1ui)},
+        {"glUniform1uiEXT", reinterpret_cast<PROC>(glUniform1ui)},
+        {"glUniform2ui", reinterpret_cast<PROC>(glUniform2ui)},
+        {"glUniform2uiEXT", reinterpret_cast<PROC>(glUniform2ui)},
+        {"glUniform3ui", reinterpret_cast<PROC>(glUniform3ui)},
+        {"glUniform3uiEXT", reinterpret_cast<PROC>(glUniform3ui)},
+        {"glUniform4ui", reinterpret_cast<PROC>(glUniform4ui)},
+        {"glUniform4uiEXT", reinterpret_cast<PROC>(glUniform4ui)},
+        {"glUniform1uiv", reinterpret_cast<PROC>(glUniform1uiv)},
+        {"glUniform1uivEXT", reinterpret_cast<PROC>(glUniform1uiv)},
+        {"glUniform2uiv", reinterpret_cast<PROC>(glUniform2uiv)},
+        {"glUniform2uivEXT", reinterpret_cast<PROC>(glUniform2uiv)},
+        {"glUniform3uiv", reinterpret_cast<PROC>(glUniform3uiv)},
+        {"glUniform3uivEXT", reinterpret_cast<PROC>(glUniform3uiv)},
+        {"glUniform4uiv", reinterpret_cast<PROC>(glUniform4uiv)},
+        {"glUniform4uivEXT", reinterpret_cast<PROC>(glUniform4uiv)},
+        {"glGetUniformuiv", reinterpret_cast<PROC>(glGetUniformuiv)},
+        {"glGetUniformuivEXT", reinterpret_cast<PROC>(glGetUniformuiv)},
+        {"glGetActiveUniformBlockiv", reinterpret_cast<PROC>(glGetActiveUniformBlockiv)},
+        {"glGetActiveUniformBlockName", reinterpret_cast<PROC>(glGetActiveUniformBlockName)},
+        {"glGetActiveUniformsiv", reinterpret_cast<PROC>(glGetActiveUniformsiv)},
+        {"glGetActiveUniformName", reinterpret_cast<PROC>(glGetActiveUniformName)},
+        {"glGetUniformIndices", reinterpret_cast<PROC>(glGetUniformIndices)},
+        {"glFrontFace", reinterpret_cast<PROC>(glFrontFace)},
+        {"glLineWidth", reinterpret_cast<PROC>(glLineWidth)},
+        {"glPointSize", reinterpret_cast<PROC>(glPointSize)},
+        {"glStencilFunc", reinterpret_cast<PROC>(glStencilFunc)},
+        {"glStencilMask", reinterpret_cast<PROC>(glStencilMask)},
+        {"glStencilOp", reinterpret_cast<PROC>(glStencilOp)},
+        {"glStencilFuncSeparate", reinterpret_cast<PROC>(glStencilFuncSeparate)},
+        {"glStencilMaskSeparate", reinterpret_cast<PROC>(glStencilMaskSeparate)},
+        {"glStencilOpSeparate", reinterpret_cast<PROC>(glStencilOpSeparate)},
+        {"glBlendColor", reinterpret_cast<PROC>(glBlendColor)},
+        {"glBlendColorEXT", reinterpret_cast<PROC>(glBlendColor)},
+        {"glBlendColorARB", reinterpret_cast<PROC>(glBlendColor)},
+        {"glClampColor", reinterpret_cast<PROC>(glClampColor)},
+        {"glClampColorARB", reinterpret_cast<PROC>(glClampColor)},
+        {"glProvokingVertex", reinterpret_cast<PROC>(glProvokingVertex)},
+        {"glProvokingVertexEXT", reinterpret_cast<PROC>(glProvokingVertex)},
+        {"glClearBufferiv", reinterpret_cast<PROC>(glClearBufferiv)},
+        {"glClearBufferuiv", reinterpret_cast<PROC>(glClearBufferuiv)},
+        {"glClearBufferfi", reinterpret_cast<PROC>(glClearBufferfi)},
+        {"glSamplerParameterIiv", reinterpret_cast<PROC>(glSamplerParameterIiv)},
+        {"glSamplerParameterIuiv", reinterpret_cast<PROC>(glSamplerParameterIuiv)},
+        {"glGetSamplerParameterIiv", reinterpret_cast<PROC>(glGetSamplerParameterIiv)},
+        {"glGetSamplerParameterIuiv", reinterpret_cast<PROC>(glGetSamplerParameterIuiv)},
+        {"glBeginQuery", reinterpret_cast<PROC>(glBeginQuery)},
+        {"glBeginQueryARB", reinterpret_cast<PROC>(glBeginQuery)},
+        {"glEndQuery", reinterpret_cast<PROC>(glEndQuery)},
+        {"glEndQueryARB", reinterpret_cast<PROC>(glEndQuery)},
+        {"glGetQueryiv", reinterpret_cast<PROC>(glGetQueryiv)},
+        {"glGetQueryivARB", reinterpret_cast<PROC>(glGetQueryiv)},
+        {"glIsQuery", reinterpret_cast<PROC>(glIsQuery)},
+        {"glIsQueryARB", reinterpret_cast<PROC>(glIsQuery)},
+        {"glGetBufferPointerv", reinterpret_cast<PROC>(glGetBufferPointerv)},
+        {"glGetBufferPointervARB", reinterpret_cast<PROC>(glGetBufferPointerv)},
+        {"glGetInteger64i_v", reinterpret_cast<PROC>(glGetInteger64i_v)},
+        {"glGetSynciv", reinterpret_cast<PROC>(glGetSynciv)},
+        {"glValidateProgram", reinterpret_cast<PROC>(glValidateProgram)},
+        {"glDetachShader", reinterpret_cast<PROC>(glDetachShader)},
+        {"glGetBooleani_v", reinterpret_cast<PROC>(glGetBooleani_v)},
+        {"glIsEnabledi", reinterpret_cast<PROC>(glIsEnabledi)},
+        {"glDrawRangeElementsBaseVertex", reinterpret_cast<PROC>(glDrawRangeElementsBaseVertex)},
+        {"glMultiDrawElements", reinterpret_cast<PROC>(glMultiDrawElements)},
+        {"glPrimitiveRestartIndex", reinterpret_cast<PROC>(glPrimitiveRestartIndex)},
     };
     for (const Entry& e : entries) {
         if (std::strcmp(e.name, name) == 0) return e.fn;

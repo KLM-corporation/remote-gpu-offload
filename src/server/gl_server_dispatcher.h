@@ -73,6 +73,7 @@ private:
     std::unordered_map<uint32_t, GLuint> m_shaders;
     std::unordered_map<uint32_t, GLuint> m_programs;
     uint32_t m_boundArrayBuffer = 0;
+    std::unordered_map<uint32_t, uint32_t> m_boundBuffers;
 
     std::unique_ptr<GlDispatchApi> m_gl;
 };
