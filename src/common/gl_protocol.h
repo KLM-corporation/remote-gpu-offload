@@ -108,7 +108,16 @@ enum GlFunc : uint16_t {
     GLF_RenderbufferStorage = 77,    // GlRenderbufferStorageArgs
     GLF_FramebufferRenderbuffer = 78,// GlFramebufferRenderbufferArgs
     GLF_TexImage3D = 79,             // GlTexImage3DArgs + pixel bytes
-    GLF_TexSubImage3D = 80           // GlTexSubImage3DArgs + pixel bytes
+    GLF_TexSubImage3D = 80,          // GlTexSubImage3DArgs + pixel bytes
+
+    // Clip Control & Indirect Draw
+    GLF_ClipControl = 81,            // GlClipControlArgs
+    GLF_DrawArraysIndirect = 82,     // GlDrawArraysIndirectArgs
+    GLF_DrawElementsIndirect = 83,   // GlDrawElementsIndirectArgs
+    GLF_MultiDrawArraysIndirect = 84,// GlMultiDrawArraysIndirectArgs
+    GLF_MultiDrawElementsIndirect = 85, // GlMultiDrawElementsIndirectArgs
+    GLF_DrawArraysInstancedBaseInstance = 86, // GlDrawArraysInstancedBaseInstanceArgs
+    GLF_DrawElementsInstancedBaseVertexBaseInstance = 87 // GlDrawElementsInstancedBaseVertexBaseInstanceArgs
 };
 
 #pragma pack(push, 1)
@@ -283,8 +292,69 @@ struct GlTexSubImage3DArgs {
     uint64_t pixel_offset;
 };
 
+struct GlClipControlArgs {
+    uint32_t origin;
+    uint32_t depth;
+};
+
+struct GlDrawArraysIndirectArgs {
+    uint32_t mode;
+    uint32_t reserved;
+    uint64_t indirect;
+};
+
+struct GlDrawElementsIndirectArgs {
+    uint32_t mode;
+    uint32_t type;
+    uint64_t indirect;
+};
+
+struct GlMultiDrawArraysIndirectArgs {
+    uint32_t mode;
+    int32_t  drawcount;
+    int32_t  stride;
+    uint32_t reserved;
+    uint64_t indirect;
+};
+
+struct GlMultiDrawElementsIndirectArgs {
+    uint32_t mode;
+    uint32_t type;
+    int32_t  drawcount;
+    int32_t  stride;
+    uint64_t indirect;
+};
+
+struct GlDrawArraysInstancedBaseInstanceArgs {
+    uint32_t mode;
+    int32_t  first;
+    int32_t  count;
+    int32_t  instancecount;
+    uint32_t baseinstance;
+    uint32_t reserved;
+};
+
+struct GlDrawElementsInstancedBaseVertexBaseInstanceArgs {
+    uint32_t mode;
+    int32_t  count;
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t indices;
+    int32_t  instancecount;
+    int32_t  basevertex;
+    uint32_t baseinstance;
+    uint32_t reserved2;
+};
+
 #pragma pack(pop)
 
+static_assert(sizeof(GlClipControlArgs) == 8);
+static_assert(sizeof(GlDrawArraysIndirectArgs) == 16);
+static_assert(sizeof(GlDrawElementsIndirectArgs) == 16);
+static_assert(sizeof(GlMultiDrawArraysIndirectArgs) == 24);
+static_assert(sizeof(GlMultiDrawElementsIndirectArgs) == 24);
+static_assert(sizeof(GlDrawArraysInstancedBaseInstanceArgs) == 24);
+static_assert(sizeof(GlDrawElementsInstancedBaseVertexBaseInstanceArgs) == 40);
 static_assert(sizeof(GlUniformArgs) == 16);
 static_assert(sizeof(GlCreateContextPayload) == 24);
 static_assert(sizeof(GlContextResponsePayload) == 140);

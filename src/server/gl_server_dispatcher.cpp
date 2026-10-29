@@ -76,6 +76,14 @@ using TexSubImage3DFn = void(WINAPI*)(GLenum, GLint, GLint, GLint, GLint, GLsize
 using GetivFn = void(WINAPI*)(GLuint, GLenum, GLint*);
 using GetInfoLogFn = void(WINAPI*)(GLuint, GLsizei, GLsizei*, char*);
 
+using ClipControlFn = void(WINAPI*)(GLenum, GLenum);
+using DrawArraysIndirectFn = void(WINAPI*)(GLenum, const void*);
+using DrawElementsIndirectFn = void(WINAPI*)(GLenum, GLenum, const void*);
+using MultiDrawArraysIndirectFn = void(WINAPI*)(GLenum, const void*, GLsizei, GLsizei);
+using MultiDrawElementsIndirectFn = void(WINAPI*)(GLenum, GLenum, const void*, GLsizei, GLsizei);
+using DrawArraysInstancedBaseInstanceFn = void(WINAPI*)(GLenum, GLint, GLsizei, GLsizei, GLuint);
+using DrawElementsInstancedBaseVertexBaseInstanceFn = void(WINAPI*)(GLenum, GLsizei, GLenum, const void*, GLsizei, GLint, GLuint);
+
 struct GlDispatchApi {
     BindAttribLocationFn bindAttribLocation = nullptr;
     GetUniformBlockIndexFn getUniformBlockIndex = nullptr;
@@ -96,6 +104,14 @@ struct GlDispatchApi {
     GetivFn getProgramiv = nullptr;
     GetInfoLogFn getShaderInfoLog = nullptr;
     GetInfoLogFn getProgramInfoLog = nullptr;
+
+    ClipControlFn clipControl = nullptr;
+    DrawArraysIndirectFn drawArraysIndirect = nullptr;
+    DrawElementsIndirectFn drawElementsIndirect = nullptr;
+    MultiDrawArraysIndirectFn multiDrawArraysIndirect = nullptr;
+    MultiDrawElementsIndirectFn multiDrawElementsIndirect = nullptr;
+    DrawArraysInstancedBaseInstanceFn drawArraysInstancedBaseInstance = nullptr;
+    DrawElementsInstancedBaseVertexBaseInstanceFn drawElementsInstancedBaseVertexBaseInstance = nullptr;
 
     GenBuffersFn genBuffers = nullptr;
     BindBufferFn bindBuffer = nullptr;
@@ -279,6 +295,14 @@ bool GlServerDispatcher::LoadGlApi() {
     LoadGl(m_gl->getProgramiv, "glGetProgramiv");
     LoadGl(m_gl->getShaderInfoLog, "glGetShaderInfoLog");
     LoadGl(m_gl->getProgramInfoLog, "glGetProgramInfoLog");
+
+    LoadGl(m_gl->clipControl, "glClipControl");
+    LoadGl(m_gl->drawArraysIndirect, "glDrawArraysIndirect");
+    LoadGl(m_gl->drawElementsIndirect, "glDrawElementsIndirect");
+    LoadGl(m_gl->multiDrawArraysIndirect, "glMultiDrawArraysIndirect");
+    LoadGl(m_gl->multiDrawElementsIndirect, "glMultiDrawElementsIndirect");
+    LoadGl(m_gl->drawArraysInstancedBaseInstance, "glDrawArraysInstancedBaseInstance");
+    LoadGl(m_gl->drawElementsInstancedBaseVertexBaseInstance, "glDrawElementsInstancedBaseVertexBaseInstance");
 
     return true;
 }
@@ -1161,6 +1185,83 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                                                  : reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pixel_offset));
                 if (m_gl->texSubImage3D) m_gl->texSubImage3D(a.target, a.level, a.xoffset, a.yoffset, a.zoffset,
                                                              a.width, a.height, a.depth, a.format, a.type, pixels);
+                break;
+            }
+            case GLF_ClipControl: {
+                if (cmd.size != sizeof(GlClipControlArgs)) return false;
+                const auto a = ReadArgs<GlClipControlArgs>(args);
+                if (m_gl->clipControl) m_gl->clipControl(a.origin, a.depth);
+                break;
+            }
+            case GLF_DrawArraysIndirect: {
+                if (cmd.size != sizeof(GlDrawArraysIndirectArgs)) return false;
+                const auto a = ReadArgs<GlDrawArraysIndirectArgs>(args);
+                if (m_gl->drawArraysIndirect) {
+                    m_gl->drawArraysIndirect(a.mode, reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indirect)));
+                }
+                break;
+            }
+            case GLF_DrawElementsIndirect: {
+                if (cmd.size != sizeof(GlDrawElementsIndirectArgs)) return false;
+                const auto a = ReadArgs<GlDrawElementsIndirectArgs>(args);
+                if (m_gl->drawElementsIndirect) {
+                    m_gl->drawElementsIndirect(a.mode, a.type, reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indirect)));
+                }
+                break;
+            }
+            case GLF_MultiDrawArraysIndirect: {
+                if (cmd.size != sizeof(GlMultiDrawArraysIndirectArgs)) return false;
+                const auto a = ReadArgs<GlMultiDrawArraysIndirectArgs>(args);
+                if (m_gl->multiDrawArraysIndirect) {
+                    m_gl->multiDrawArraysIndirect(a.mode, reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indirect)),
+                                                  a.drawcount, a.stride);
+                }
+                break;
+            }
+            case GLF_MultiDrawElementsIndirect: {
+                if (cmd.size != sizeof(GlMultiDrawElementsIndirectArgs)) return false;
+                const auto a = ReadArgs<GlMultiDrawElementsIndirectArgs>(args);
+                if (m_gl->multiDrawElementsIndirect) {
+                    m_gl->multiDrawElementsIndirect(a.mode, a.type,
+                                                    reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indirect)),
+                                                    a.drawcount, a.stride);
+                }
+                break;
+            }
+            case GLF_DrawArraysInstancedBaseInstance: {
+                if (cmd.size != sizeof(GlDrawArraysInstancedBaseInstanceArgs)) return false;
+                const auto a = ReadArgs<GlDrawArraysInstancedBaseInstanceArgs>(args);
+                if (m_gl->drawArraysInstancedBaseInstance) {
+                    m_gl->drawArraysInstancedBaseInstance(a.mode, a.first, a.count, a.instancecount, a.baseinstance);
+                } else if (m_gl->drawArraysInstanced) {
+                    m_gl->drawArraysInstanced(a.mode, a.first, a.count, a.instancecount);
+                } else {
+                    glDrawArrays(a.mode, a.first, a.count);
+                }
+                break;
+            }
+            case GLF_DrawElementsInstancedBaseVertexBaseInstance: {
+                if (cmd.size != sizeof(GlDrawElementsInstancedBaseVertexBaseInstanceArgs)) return false;
+                const auto a = ReadArgs<GlDrawElementsInstancedBaseVertexBaseInstanceArgs>(args);
+                if (m_gl->drawElementsInstancedBaseVertexBaseInstance) {
+                    m_gl->drawElementsInstancedBaseVertexBaseInstance(
+                        a.mode, a.count, a.type,
+                        reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indices)),
+                        a.instancecount, a.basevertex, a.baseinstance);
+                } else if (m_gl->drawElementsInstancedBaseVertex) {
+                    m_gl->drawElementsInstancedBaseVertex(
+                        a.mode, a.count, a.type,
+                        reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indices)),
+                        a.instancecount, a.basevertex);
+                } else if (m_gl->drawElementsInstanced) {
+                    m_gl->drawElementsInstanced(
+                        a.mode, a.count, a.type,
+                        reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indices)),
+                        a.instancecount);
+                } else {
+                    glDrawElements(a.mode, a.count, a.type,
+                                   reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indices)));
+                }
                 break;
             }
             default:

@@ -452,6 +452,11 @@ void WINAPI glGetIntegerv(unsigned pname, int* params) {
             *params = g_currentBoundBuffers[0x8A11];
             break;
         }
+        case 0x8F43: { // GL_DRAW_INDIRECT_BUFFER_BINDING
+            std::lock_guard<std::mutex> lock(g_bufferMutex);
+            *params = g_currentBoundBuffers[0x8F3F];
+            break;
+        }
         case 0x0BA2: // GL_VIEWPORT
             params[0] = 0; params[1] = 0;
             params[2] = t_current ? t_current->session.Width() : kFallbackWidth;
@@ -2055,7 +2060,11 @@ void WINAPI glDrawRangeElementsBaseVertex(unsigned mode, unsigned start, unsigne
 }
 
 void WINAPI glMultiDrawElements(unsigned mode, const int* count, unsigned type, const void* const* indices, int drawcount) {
-    Log("[GL] glMultiDrawElements(mode: 0x%X, type: 0x%X, drawcount: %d)", mode, type, drawcount);
+    Log("[GL] glMultiDrawElements(mode: 0x%X, draws: %d)", mode, drawcount);
+    if (!count || !indices || drawcount <= 0) return;
+    for (int i = 0; i < drawcount; ++i) {
+        glDrawElements(mode, count[i], type, indices[i]);
+    }
 }
 
 void WINAPI glPrimitiveRestartIndex(unsigned index) {
@@ -2156,6 +2165,7 @@ void WINAPI glClearBufferfv(unsigned buffer, int drawbuffer, const float* value)
         glClearColor(value[0], value[1], value[2], value[3]);
         glClear(0x4000 /*GL_COLOR_BUFFER_BIT*/);
     } else if (buffer == 0x1801 /*GL_DEPTH*/ && value) {
+        glClearDepth(value[0]);
         glClear(0x0100 /*GL_DEPTH_BUFFER_BIT*/);
     }
 }
@@ -2181,6 +2191,10 @@ void WINAPI glClearBufferfi(unsigned buffer, int drawbuffer, float depth, int st
 
 void WINAPI glClipControl(unsigned origin, unsigned depth) {
     Log("[GL] glClipControl(origin: 0x%X, depth: 0x%X)", origin, depth);
+    if (t_current) {
+        GlClipControlArgs args = {origin, depth};
+        t_current->session.Append(GLF_ClipControl, &args, sizeof(args));
+    }
 }
 
 void WINAPI glDisablei(unsigned cap, unsigned index) {
@@ -2217,15 +2231,26 @@ void WINAPI glDrawBuffer(unsigned mode) {
 
 void WINAPI glDrawArraysIndirect(unsigned mode, const void* indirect) {
     Log("[GL] glDrawArraysIndirect(mode: 0x%X, indirect: %p)", mode, indirect);
+    if (t_current) {
+        GlDrawArraysIndirectArgs args = {mode, 0, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indirect))};
+        t_current->session.Append(GLF_DrawArraysIndirect, &args, sizeof(args));
+    }
 }
 
 void WINAPI glDrawArraysInstancedBaseInstance(unsigned mode, int first, int count, int instancecount, unsigned baseinstance) {
     Log("[GL] glDrawArraysInstancedBaseInstance(mode: 0x%X, first: %d, count: %d, instances: %d, base: %u)",
         mode, first, count, instancecount, baseinstance);
+    if (!t_current || count <= 0 || instancecount <= 0) return;
+    GlDrawArraysInstancedBaseInstanceArgs args = {mode, first, count, instancecount, baseinstance, 0};
+    t_current->session.Append(GLF_DrawArraysInstancedBaseInstance, &args, sizeof(args));
 }
 
 void WINAPI glDrawElementsIndirect(unsigned mode, unsigned type, const void* indirect) {
     Log("[GL] glDrawElementsIndirect(mode: 0x%X, type: 0x%X, indirect: %p)", mode, type, indirect);
+    if (t_current) {
+        GlDrawElementsIndirectArgs args = {mode, type, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indirect))};
+        t_current->session.Append(GLF_DrawElementsIndirect, &args, sizeof(args));
+    }
 }
 
 void WINAPI glDrawElementsInstancedBaseVertex(unsigned mode, int count, unsigned type, const void* indices, int instancecount, int basevertex) {
@@ -2244,23 +2269,47 @@ void WINAPI glDrawElementsInstancedBaseVertexBaseInstance(unsigned mode, int cou
                                                          int instancecount, int basevertex, unsigned baseinstance) {
     Log("[GL] glDrawElementsInstancedBaseVertexBaseInstance(mode: 0x%X, count: %d, type: 0x%X, inst: %d, base: %d, baseInst: %u)",
         mode, count, type, instancecount, basevertex, baseinstance);
+    if (!t_current || count <= 0 || instancecount <= 0) return;
+    GlDrawElementsInstancedBaseVertexBaseInstanceArgs args = {
+        mode, count, type, 0,
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indices)),
+        instancecount, basevertex, baseinstance, 0
+    };
+    t_current->session.Append(GLF_DrawElementsInstancedBaseVertexBaseInstance, &args, sizeof(args));
 }
 
 void WINAPI glMultiDrawArrays(unsigned mode, const int* first, const int* count, int drawcount) {
     Log("[GL] glMultiDrawArrays(mode: 0x%X, draws: %d)", mode, drawcount);
+    if (!first || !count || drawcount <= 0) return;
+    for (int i = 0; i < drawcount; ++i) {
+        glDrawArrays(mode, first[i], count[i]);
+    }
 }
 
 void WINAPI glMultiDrawArraysIndirect(unsigned mode, const void* indirect, int drawcount, int stride) {
-    Log("[GL] glMultiDrawArraysIndirect(mode: 0x%X, draws: %d, stride: %d)", mode, drawcount, stride);
+    Log("[GL] glMultiDrawArraysIndirect(mode: 0x%X, indirect: %p, draws: %d, stride: %d)", mode, indirect, drawcount, stride);
+    if (t_current && drawcount > 0) {
+        GlMultiDrawArraysIndirectArgs args = {mode, drawcount, stride, 0, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indirect))};
+        t_current->session.Append(GLF_MultiDrawArraysIndirect, &args, sizeof(args));
+    }
 }
 
 void WINAPI glMultiDrawElementsBaseVertex(unsigned mode, const int* count, unsigned type,
                                          const void* const* indices, int drawcount, const int* basevertex) {
     Log("[GL] glMultiDrawElementsBaseVertex(mode: 0x%X, draws: %d)", mode, drawcount);
+    if (!count || !indices || drawcount <= 0) return;
+    for (int i = 0; i < drawcount; ++i) {
+        int bv = basevertex ? basevertex[i] : 0;
+        glDrawElementsBaseVertex(mode, count[i], type, indices[i], bv);
+    }
 }
 
 void WINAPI glMultiDrawElementsIndirect(unsigned mode, unsigned type, const void* indirect, int drawcount, int stride) {
-    Log("[GL] glMultiDrawElementsIndirect(mode: 0x%X, draws: %d, stride: %d)", mode, drawcount, stride);
+    Log("[GL] glMultiDrawElementsIndirect(mode: 0x%X, type: 0x%X, indirect: %p, draws: %d, stride: %d)", mode, type, indirect, drawcount, stride);
+    if (t_current && drawcount > 0) {
+        GlMultiDrawElementsIndirectArgs args = {mode, type, drawcount, stride, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(indirect))};
+        t_current->session.Append(GLF_MultiDrawElementsIndirect, &args, sizeof(args));
+    }
 }
 
 static unsigned g_nextQueryId = 1;
