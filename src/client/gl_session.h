@@ -43,6 +43,9 @@ public:
     // Sends the batch plus the swap, waits for the frame and shows it in `hwnd`.
     bool Swap(HWND hwnd);
 
+    // Resizes the host framebuffer to the client area of `hwnd` (pending commands are flushed first).
+    void ResizeToWindow(HWND hwnd);
+
     bool IsConnected() const noexcept { return m_socket && m_socket->IsValid() && !m_broken; }
     uint32_t Width() const noexcept { return m_width; }
     uint32_t Height() const noexcept { return m_height; }
@@ -51,7 +54,6 @@ public:
 private:
     bool SendPacket(uint16_t opcode, const void* payload, uint32_t size);
     bool ReceiveFrame();
-    void ResizeToWindow(HWND hwnd);
 
     std::unique_ptr<NetworkSocket> m_socket;
     GdiPresenter m_presenter;

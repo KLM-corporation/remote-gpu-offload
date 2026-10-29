@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <iostream>
+#include <string>
 
 #include "frame_codec.h"
 
@@ -57,7 +58,45 @@ using DrawElementsInstancedBaseVertexFn = void(WINAPI*)(GLenum, GLsizei, GLenum,
 using DrawArraysInstancedFn = void(WINAPI*)(GLenum, GLint, GLsizei, GLsizei);
 using BlendFuncSeparateFn = void(WINAPI*)(GLenum, GLenum, GLenum, GLenum);
 
+using BindAttribLocationFn = void(WINAPI*)(GLuint, GLuint, const char*);
+using GetUniformBlockIndexFn = GLuint(WINAPI*)(GLuint, const char*);
+using UniformBlockBindingFn = void(WINAPI*)(GLuint, GLuint, GLuint);
+using GetUniformLocationFn = GLint(WINAPI*)(GLuint, const char*);
+using UniformVFn = void(WINAPI*)(GLint, GLsizei, const void*);
+using UniformMatrixFn = void(WINAPI*)(GLint, GLsizei, GLboolean, const void*);
+using VertexAttribIPointerFn = void(WINAPI*)(GLuint, GLint, GLenum, GLsizei, const void*);
+using BlendEquationSeparateFn = void(WINAPI*)(GLenum, GLenum);
+using GenRenderbuffersFn = void(WINAPI*)(GLsizei, GLuint*);
+using BindRenderbufferFn = void(WINAPI*)(GLenum, GLuint);
+using DeleteRenderbuffersFn = void(WINAPI*)(GLsizei, const GLuint*);
+using RenderbufferStorageFn = void(WINAPI*)(GLenum, GLenum, GLsizei, GLsizei);
+using FramebufferRenderbufferFn = void(WINAPI*)(GLenum, GLenum, GLenum, GLuint);
+using TexImage3DFn = void(WINAPI*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+using TexSubImage3DFn = void(WINAPI*)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void*);
+using GetivFn = void(WINAPI*)(GLuint, GLenum, GLint*);
+using GetInfoLogFn = void(WINAPI*)(GLuint, GLsizei, GLsizei*, char*);
+
 struct GlDispatchApi {
+    BindAttribLocationFn bindAttribLocation = nullptr;
+    GetUniformBlockIndexFn getUniformBlockIndex = nullptr;
+    UniformBlockBindingFn uniformBlockBinding = nullptr;
+    GetUniformLocationFn getUniformLocation = nullptr;
+    UniformVFn uniformV[3][4] = {};
+    UniformMatrixFn uniformMatrix[3] = {};
+    VertexAttribIPointerFn vertexAttribIPointer = nullptr;
+    BlendEquationSeparateFn blendEquationSeparate = nullptr;
+    GenRenderbuffersFn genRenderbuffers = nullptr;
+    BindRenderbufferFn bindRenderbuffer = nullptr;
+    DeleteRenderbuffersFn deleteRenderbuffers = nullptr;
+    RenderbufferStorageFn renderbufferStorage = nullptr;
+    FramebufferRenderbufferFn framebufferRenderbuffer = nullptr;
+    TexImage3DFn texImage3D = nullptr;
+    TexSubImage3DFn texSubImage3D = nullptr;
+    GetivFn getShaderiv = nullptr;
+    GetivFn getProgramiv = nullptr;
+    GetInfoLogFn getShaderInfoLog = nullptr;
+    GetInfoLogFn getProgramInfoLog = nullptr;
+
     GenBuffersFn genBuffers = nullptr;
     BindBufferFn bindBuffer = nullptr;
     BufferDataFn bufferData = nullptr;
@@ -124,6 +163,12 @@ inline bool IsValidBufferTarget(GLenum target) {
            target == 0x8F37 /*GL_COPY_WRITE_BUFFER*/ ||
            target == 0x8F3F /*GL_DRAW_INDIRECT_BUFFER*/ ||
            target == 0x90D2 /*GL_SHADER_STORAGE_BUFFER*/;
+}
+
+// Client FBO 0 is the host offscreen FBO, where the default-framebuffer enums are invalid.
+inline GLenum TranslateDrawBuffer(GLenum mode, bool isDefault) {
+    if (isDefault && mode >= 0x0400 && mode <= 0x0408) return 0x8CE0; // GL_COLOR_ATTACHMENT0
+    return mode;
 }
 
 template <typename T> bool LoadGl(T& fn, const char* name) {
@@ -201,6 +246,39 @@ bool GlServerDispatcher::LoadGlApi() {
     LoadGl(m_gl->drawElementsInstancedBaseVertex, "glDrawElementsInstancedBaseVertex");
     LoadGl(m_gl->drawArraysInstanced, "glDrawArraysInstanced");
     LoadGl(m_gl->blendFuncSeparate, "glBlendFuncSeparate");
+
+    LoadGl(m_gl->bindAttribLocation, "glBindAttribLocation");
+    LoadGl(m_gl->getUniformBlockIndex, "glGetUniformBlockIndex");
+    LoadGl(m_gl->uniformBlockBinding, "glUniformBlockBinding");
+    LoadGl(m_gl->getUniformLocation, "glGetUniformLocation");
+    LoadGl(m_gl->uniformV[0][0], "glUniform1fv");
+    LoadGl(m_gl->uniformV[0][1], "glUniform2fv");
+    LoadGl(m_gl->uniformV[0][2], "glUniform3fv");
+    LoadGl(m_gl->uniformV[0][3], "glUniform4fv");
+    LoadGl(m_gl->uniformV[1][0], "glUniform1iv");
+    LoadGl(m_gl->uniformV[1][1], "glUniform2iv");
+    LoadGl(m_gl->uniformV[1][2], "glUniform3iv");
+    LoadGl(m_gl->uniformV[1][3], "glUniform4iv");
+    LoadGl(m_gl->uniformV[2][0], "glUniform1uiv");
+    LoadGl(m_gl->uniformV[2][1], "glUniform2uiv");
+    LoadGl(m_gl->uniformV[2][2], "glUniform3uiv");
+    LoadGl(m_gl->uniformV[2][3], "glUniform4uiv");
+    LoadGl(m_gl->uniformMatrix[0], "glUniformMatrix2fv");
+    LoadGl(m_gl->uniformMatrix[1], "glUniformMatrix3fv");
+    LoadGl(m_gl->uniformMatrix[2], "glUniformMatrix4fv");
+    LoadGl(m_gl->vertexAttribIPointer, "glVertexAttribIPointer");
+    LoadGl(m_gl->blendEquationSeparate, "glBlendEquationSeparate");
+    LoadGl(m_gl->genRenderbuffers, "glGenRenderbuffers");
+    LoadGl(m_gl->bindRenderbuffer, "glBindRenderbuffer");
+    LoadGl(m_gl->deleteRenderbuffers, "glDeleteRenderbuffers");
+    LoadGl(m_gl->renderbufferStorage, "glRenderbufferStorage");
+    LoadGl(m_gl->framebufferRenderbuffer, "glFramebufferRenderbuffer");
+    LoadGl(m_gl->texImage3D, "glTexImage3D");
+    LoadGl(m_gl->texSubImage3D, "glTexSubImage3D");
+    LoadGl(m_gl->getShaderiv, "glGetShaderiv");
+    LoadGl(m_gl->getProgramiv, "glGetProgramiv");
+    LoadGl(m_gl->getShaderInfoLog, "glGetShaderInfoLog");
+    LoadGl(m_gl->getProgramInfoLog, "glGetProgramInfoLog");
 
     return true;
 }
@@ -399,6 +477,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (itBuf == m_buffers.end()) return false;
                 auto& buffer = itBuf->second;
                 buffer.target = a.target;
+                buffer.gpu_size = a.size;
                 if (hasData) {
                     buffer.data.assign(args + sizeof(a), args + cmd.size);
                 } else {
@@ -455,6 +534,15 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 auto it = m_shaders.find(a.id);
                 if (it == m_shaders.end()) return false;
                 m_gl->compileShader(it->second);
+                if (m_gl->getShaderiv && m_gl->getShaderInfoLog) {
+                    GLint ok = 1;
+                    m_gl->getShaderiv(it->second, 0x8B81 /*GL_COMPILE_STATUS*/, &ok);
+                    if (!ok) {
+                        char log[2048] = {};
+                        m_gl->getShaderInfoLog(it->second, sizeof(log) - 1, nullptr, log);
+                        std::cerr << "[GlServer] Shader " << a.id << " compile FAILED:\n" << log << std::endl;
+                    }
+                }
                 break;
             }
             case GLF_AttachShader: {
@@ -471,6 +559,15 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 auto it = m_programs.find(a.id);
                 if (it == m_programs.end()) return false;
                 m_gl->linkProgram(it->second);
+                if (m_gl->getProgramiv && m_gl->getProgramInfoLog) {
+                    GLint ok = 1;
+                    m_gl->getProgramiv(it->second, 0x8B82 /*GL_LINK_STATUS*/, &ok);
+                    if (!ok) {
+                        char log[2048] = {};
+                        m_gl->getProgramInfoLog(it->second, sizeof(log) - 1, nullptr, log);
+                        std::cerr << "[GlServer] Program " << a.id << " link FAILED:\n" << log << std::endl;
+                    }
+                }
                 break;
             }
             case GLF_UseProgram: {
@@ -627,6 +724,12 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                     if (it != m_framebuffers.end()) fbo = it->second;
                 }
                 if (m_gl->bindFramebuffer) m_gl->bindFramebuffer(a.target, fbo);
+                {
+                    const bool isDef = (fbo == m_device.Fbo());
+                    if (a.target == 0x8D40 /*GL_FRAMEBUFFER*/) { m_drawFboDefault = m_readFboDefault = isDef; }
+                    else if (a.target == 0x8CA9 /*GL_DRAW_FRAMEBUFFER*/) m_drawFboDefault = isDef;
+                    else if (a.target == 0x8CA8 /*GL_READ_FRAMEBUFFER*/) m_readFboDefault = isDef;
+                }
                 break;
             }
             case GLF_DeleteFramebuffers: {
@@ -667,7 +770,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_DrawBuffer: {
                 if (cmd.size != sizeof(GlIdArgs)) return false;
                 const auto a = ReadArgs<GlIdArgs>(args);
-                glDrawBuffer(a.id);
+                glDrawBuffer(TranslateDrawBuffer(a.id, m_drawFboDefault));
                 break;
             }
             case GLF_DrawBuffers: {
@@ -675,7 +778,11 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 const auto a = ReadArgs<GlDrawBuffersArgs>(args);
                 if (cmd.size != sizeof(GlDrawBuffersArgs) + a.n * sizeof(uint32_t)) return false;
                 const uint32_t* bufs = reinterpret_cast<const uint32_t*>(args + sizeof(GlDrawBuffersArgs));
-                if (m_gl->drawBuffers) m_gl->drawBuffers(static_cast<GLsizei>(a.n), reinterpret_cast<const GLenum*>(bufs));
+                if (m_gl->drawBuffers) {
+                    std::vector<GLenum> tr(a.n);
+                    for (uint32_t i = 0; i < a.n; ++i) tr[i] = TranslateDrawBuffer(bufs[i], m_drawFboDefault);
+                    m_gl->drawBuffers(static_cast<GLsizei>(a.n), tr.data());
+                }
                 break;
             }
             case GLF_GenVertexArrays: {
@@ -730,7 +837,10 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_VertexAttribPointer: {
                 if (cmd.size != sizeof(GlVertexAttribPointerArgs)) return false;
                 const auto a = ReadArgs<GlVertexAttribPointerArgs>(args);
-                if (m_gl->vertexAttribPointer) {
+                if (a.reserved[0] == 1 && m_gl->vertexAttribIPointer) {
+                    m_gl->vertexAttribIPointer(a.index, a.size, a.type, a.stride,
+                                               reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pointer)));
+                } else if (m_gl->vertexAttribPointer) {
                     m_gl->vertexAttribPointer(a.index, a.size, a.type, a.normalized, a.stride,
                                               reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pointer)));
                 }
@@ -774,6 +884,16 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (!IsValidBufferTarget(a.target)) return false;
                 if (cmd.size != sizeof(GlBufferSubDataArgs) + a.size) return false;
                 const void* data = args + sizeof(GlBufferSubDataArgs);
+                {
+                    auto itB = m_boundBuffers.find(a.target);
+                    if (itB != m_boundBuffers.end() && itB->second != 0) {
+                        auto itBuf = m_buffers.find(itB->second);
+                        if (itBuf != m_buffers.end() && a.offset + a.size > itBuf->second.gpu_size) {
+                            itBuf->second.gpu_size = a.offset + a.size;
+                            m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(itBuf->second.gpu_size), nullptr, 0x88E8 /*GL_DYNAMIC_DRAW*/);
+                        }
+                    }
+                }
                 if (m_gl->bufferSubData) {
                     m_gl->bufferSubData(a.target, static_cast<std::ptrdiff_t>(a.offset),
                                         static_cast<std::ptrdiff_t>(a.size), data);
@@ -871,6 +991,176 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                                             static_cast<std::ptrdiff_t>(a.writeOffset),
                                             static_cast<std::ptrdiff_t>(a.size));
                 }
+                break;
+            }
+            case GLF_PixelStorei: {
+                if (cmd.size != sizeof(GlPixelStoreiArgs)) return false;
+                const auto a = ReadArgs<GlPixelStoreiArgs>(args);
+                glPixelStorei(a.pname, a.param);
+                break;
+            }
+            case GLF_BindAttribLocation: {
+                if (cmd.size < sizeof(GlBindAttribLocationArgs)) return false;
+                const auto a = ReadArgs<GlBindAttribLocationArgs>(args);
+                if (cmd.size != sizeof(a) + a.name_len || a.name_len > 256) return false;
+                auto it = m_programs.find(a.program);
+                if (it != m_programs.end()) {
+                    std::string name(reinterpret_cast<const char*>(args + sizeof(a)), a.name_len);
+                    if (m_gl->bindAttribLocation) m_gl->bindAttribLocation(it->second, a.index, name.c_str());
+                }
+                break;
+            }
+            case GLF_UniformBlockBinding: {
+                if (cmd.size < sizeof(GlUniformBlockBindingArgs)) return false;
+                const auto a = ReadArgs<GlUniformBlockBindingArgs>(args);
+                if (cmd.size != sizeof(a) + a.name_len || a.name_len > 256) return false;
+                auto it = m_programs.find(a.program);
+                if (it != m_programs.end()) {
+                    std::string name(reinterpret_cast<const char*>(args + sizeof(a)), a.name_len);
+                    if (m_gl->getUniformBlockIndex && m_gl->uniformBlockBinding) {
+                        const GLuint idx = m_gl->getUniformBlockIndex(it->second, name.c_str());
+                        if (idx != 0xFFFFFFFFu) m_gl->uniformBlockBinding(it->second, idx, a.binding);
+                    }
+                }
+                break;
+            }
+            case GLF_RegisterUniformLocation: {
+                if (cmd.size < sizeof(GlRegisterUniformLocationArgs)) return false;
+                const auto a = ReadArgs<GlRegisterUniformLocationArgs>(args);
+                if (cmd.size != sizeof(a) + a.name_len || a.name_len > 256) return false;
+                auto it = m_programs.find(a.program);
+                if (it != m_programs.end()) {
+                    std::string name(reinterpret_cast<const char*>(args + sizeof(a)), a.name_len);
+                    m_uniformLocs[a.client_loc] = m_gl->getUniformLocation ? m_gl->getUniformLocation(it->second, name.c_str()) : -1;
+                } else {
+                    m_uniformLocs[a.client_loc] = -1;
+                }
+                break;
+            }
+            case GLF_Uniform: {
+                if (cmd.size < sizeof(GlUniformArgs)) return false;
+                const auto a = ReadArgs<GlUniformArgs>(args);
+                if (cmd.size != sizeof(a) + a.data_size || a.type > 2 || a.comps < 1 || a.comps > 4 || a.count <= 0) return false;
+                const size_t elems = a.matrix ? static_cast<size_t>(a.comps) * a.comps : a.comps;
+                if (a.data_size != elems * 4 * static_cast<size_t>(a.count)) return false;
+                auto it = m_uniformLocs.find(a.client_loc);
+                if (it == m_uniformLocs.end() || it->second < 0) break;
+                const void* data = args + sizeof(a);
+                if (a.matrix) {
+                    if (a.type != 0 || a.comps < 2) return false;
+                    auto fn = m_gl->uniformMatrix[a.comps - 2];
+                    if (fn) fn(it->second, a.count, a.transpose ? GL_TRUE : GL_FALSE, data);
+                } else {
+                    auto fn = m_gl->uniformV[a.type][a.comps - 1];
+                    if (fn) fn(it->second, a.count, data);
+                }
+                break;
+            }
+            case GLF_BlendEquationSeparate: {
+                if (cmd.size != sizeof(GlBlendEquationSeparateArgs)) return false;
+                const auto a = ReadArgs<GlBlendEquationSeparateArgs>(args);
+                if (m_gl->blendEquationSeparate) m_gl->blendEquationSeparate(a.modeRGB, a.modeAlpha);
+                break;
+            }
+            case GLF_CullFace: {
+                if (cmd.size != sizeof(GlIdArgs)) return false;
+                glCullFace(ReadArgs<GlIdArgs>(args).id);
+                break;
+            }
+            case GLF_FrontFace: {
+                if (cmd.size != sizeof(GlIdArgs)) return false;
+                glFrontFace(ReadArgs<GlIdArgs>(args).id);
+                break;
+            }
+            case GLF_PolygonOffset: {
+                if (cmd.size != sizeof(GlPolygonOffsetArgs)) return false;
+                const auto a = ReadArgs<GlPolygonOffsetArgs>(args);
+                glPolygonOffset(a.factor, a.units);
+                break;
+            }
+            case GLF_ClearDepth: {
+                if (cmd.size != sizeof(GlClearDepthArgs)) return false;
+                glClearDepth(ReadArgs<GlClearDepthArgs>(args).depth);
+                break;
+            }
+            case GLF_ReadBuffer: {
+                if (cmd.size != sizeof(GlIdArgs)) return false;
+                glReadBuffer(TranslateDrawBuffer(ReadArgs<GlIdArgs>(args).id, m_readFboDefault));
+                break;
+            }
+            case GLF_GenRenderbuffers: {
+                if (cmd.size < sizeof(GlGenArgs)) return false;
+                const auto a = ReadArgs<GlGenArgs>(args);
+                if (cmd.size != sizeof(GlGenArgs) + a.count * sizeof(uint32_t)) return false;
+                const uint32_t* ids = reinterpret_cast<const uint32_t*>(args + sizeof(GlGenArgs));
+                for (uint32_t i = 0; i < a.count; ++i) {
+                    GLuint rb = 0;
+                    if (m_gl->genRenderbuffers) m_gl->genRenderbuffers(1, &rb);
+                    m_renderbuffers[ids[i]] = rb;
+                }
+                break;
+            }
+            case GLF_BindRenderbuffer: {
+                if (cmd.size != sizeof(GlBindRenderbufferArgs)) return false;
+                const auto a = ReadArgs<GlBindRenderbufferArgs>(args);
+                GLuint rb = 0;
+                if (a.id != 0) {
+                    auto it = m_renderbuffers.find(a.id);
+                    if (it != m_renderbuffers.end()) rb = it->second;
+                }
+                if (m_gl->bindRenderbuffer) m_gl->bindRenderbuffer(a.target, rb);
+                break;
+            }
+            case GLF_DeleteRenderbuffers: {
+                if (cmd.size < sizeof(GlGenArgs)) return false;
+                const auto a = ReadArgs<GlGenArgs>(args);
+                if (cmd.size != sizeof(GlGenArgs) + a.count * sizeof(uint32_t)) return false;
+                const uint32_t* ids = reinterpret_cast<const uint32_t*>(args + sizeof(GlGenArgs));
+                for (uint32_t i = 0; i < a.count; ++i) {
+                    auto it = m_renderbuffers.find(ids[i]);
+                    if (it != m_renderbuffers.end()) {
+                        if (m_gl->deleteRenderbuffers) m_gl->deleteRenderbuffers(1, &it->second);
+                        m_renderbuffers.erase(it);
+                    }
+                }
+                break;
+            }
+            case GLF_RenderbufferStorage: {
+                if (cmd.size != sizeof(GlRenderbufferStorageArgs)) return false;
+                const auto a = ReadArgs<GlRenderbufferStorageArgs>(args);
+                if (a.width < 0 || a.height < 0 || a.width > kMaxViewportDim || a.height > kMaxViewportDim) return false;
+                if (m_gl->renderbufferStorage) m_gl->renderbufferStorage(a.target, a.internalformat, a.width, a.height);
+                break;
+            }
+            case GLF_FramebufferRenderbuffer: {
+                if (cmd.size != sizeof(GlFramebufferRenderbufferArgs)) return false;
+                const auto a = ReadArgs<GlFramebufferRenderbufferArgs>(args);
+                GLuint rb = 0;
+                if (a.renderbuffer != 0) {
+                    auto it = m_renderbuffers.find(a.renderbuffer);
+                    if (it != m_renderbuffers.end()) rb = it->second;
+                }
+                if (m_gl->framebufferRenderbuffer) m_gl->framebufferRenderbuffer(a.target, a.attachment, a.rbtarget, rb);
+                break;
+            }
+            case GLF_TexImage3D: {
+                if (cmd.size < sizeof(GlTexImage3DArgs)) return false;
+                const auto a = ReadArgs<GlTexImage3DArgs>(args);
+                if (cmd.size != sizeof(a) + a.data_size) return false;
+                const void* pixels = a.data_size ? static_cast<const void*>(args + sizeof(a))
+                                                 : reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pixel_offset));
+                if (m_gl->texImage3D) m_gl->texImage3D(a.target, a.level, a.internalformat, a.width, a.height, a.depth,
+                                                       a.border, a.format, a.type, pixels);
+                break;
+            }
+            case GLF_TexSubImage3D: {
+                if (cmd.size < sizeof(GlTexSubImage3DArgs)) return false;
+                const auto a = ReadArgs<GlTexSubImage3DArgs>(args);
+                if (cmd.size != sizeof(a) + a.data_size) return false;
+                const void* pixels = a.data_size ? static_cast<const void*>(args + sizeof(a))
+                                                 : reinterpret_cast<const void*>(static_cast<uintptr_t>(a.pixel_offset));
+                if (m_gl->texSubImage3D) m_gl->texSubImage3D(a.target, a.level, a.xoffset, a.yoffset, a.zoffset,
+                                                             a.width, a.height, a.depth, a.format, a.type, pixels);
                 break;
             }
             default:

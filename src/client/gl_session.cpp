@@ -234,6 +234,7 @@ void GlSession::ResizeToWindow(HWND hwnd) {
     const uint32_t height = static_cast<uint32_t>(rc.bottom - rc.top);
     if (width == 0 || height == 0 || width > GL_MAX_FRAMEBUFFER_DIM || height > GL_MAX_FRAMEBUFFER_DIM) return;
     if (width == m_width && height == m_height) return;
+    Flush();
     GlResizePayload p = {width, height};
     if (SendPacket(OP_GL_RESIZE, &p, sizeof(p))) {
         m_width = width;

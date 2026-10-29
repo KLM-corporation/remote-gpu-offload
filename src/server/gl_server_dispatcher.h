@@ -68,7 +68,7 @@ private:
     uint64_t m_rawBytes = 0;
     uint64_t m_sentBytes = 0;
 
-    struct Buffer { uint32_t target = 0; GLuint gl_id = 0; std::vector<uint8_t> data; };
+    struct Buffer { uint32_t target = 0; GLuint gl_id = 0; uint64_t gpu_size = 0; std::vector<uint8_t> data; };
     std::unordered_map<uint32_t, Buffer> m_buffers;
     std::unordered_map<uint32_t, GLuint> m_shaders;
     std::unordered_map<uint32_t, GLuint> m_programs;
@@ -76,6 +76,10 @@ private:
     std::unordered_map<uint32_t, GLuint> m_framebuffers;
     std::unordered_map<uint32_t, GLuint> m_vaos;
     std::unordered_map<uint32_t, GLuint> m_samplers;
+    std::unordered_map<uint32_t, GLuint> m_renderbuffers;
+    std::unordered_map<int32_t, int32_t> m_uniformLocs; // client location -> host location
+    bool m_drawFboDefault = true; // client FBO 0 (host offscreen FBO) bound as draw target
+    bool m_readFboDefault = true;
     uint32_t m_boundArrayBuffer = 0;
     std::unordered_map<uint32_t, uint32_t> m_boundBuffers;
 

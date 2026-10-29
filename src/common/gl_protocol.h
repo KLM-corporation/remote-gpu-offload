@@ -88,7 +88,27 @@ enum GlFunc : uint16_t {
     GLF_DepthMask = 59,              // GlIdArgs
     GLF_ColorMask = 60,              // GlColorMaskArgs
     GLF_PolygonMode = 61,            // GlPolygonModeArgs
-    GLF_CopyBufferSubData = 62       // GlCopyBufferSubDataArgs
+    GLF_CopyBufferSubData = 62,      // GlCopyBufferSubDataArgs
+
+    // Shaders, Uniforms, Renderbuffers & Extended State
+    GLF_PixelStorei = 63,            // GlPixelStoreiArgs
+    GLF_BindAttribLocation = 64,     // GlBindAttribLocationArgs + name
+    GLF_UniformBlockBinding = 65,    // GlUniformBlockBindingArgs + name
+    GLF_RegisterUniformLocation = 66,// GlRegisterUniformLocationArgs + name
+    GLF_Uniform = 67,                // GlUniformArgs + data
+    GLF_BlendEquationSeparate = 68,  // GlBlendEquationSeparateArgs
+    GLF_CullFace = 69,               // GlIdArgs
+    GLF_FrontFace = 70,              // GlIdArgs
+    GLF_PolygonOffset = 71,          // GlPolygonOffsetArgs
+    GLF_ClearDepth = 72,             // GlClearDepthArgs
+    GLF_ReadBuffer = 73,             // GlIdArgs
+    GLF_GenRenderbuffers = 74,       // GlGenArgs + uint32_t ids
+    GLF_BindRenderbuffer = 75,       // GlBindRenderbufferArgs
+    GLF_DeleteRenderbuffers = 76,    // GlGenArgs + uint32_t ids
+    GLF_RenderbufferStorage = 77,    // GlRenderbufferStorageArgs
+    GLF_FramebufferRenderbuffer = 78,// GlFramebufferRenderbufferArgs
+    GLF_TexImage3D = 79,             // GlTexImage3DArgs + pixel bytes
+    GLF_TexSubImage3D = 80           // GlTexSubImage3DArgs + pixel bytes
 };
 
 #pragma pack(push, 1)
@@ -230,8 +250,42 @@ struct GlCopyBufferSubDataArgs {
     uint64_t size;
 };
 
+struct GlPixelStoreiArgs { uint32_t pname; int32_t param; };
+struct GlBindAttribLocationArgs { uint32_t program, index, name_len; };
+struct GlUniformBlockBindingArgs { uint32_t program, block_index, binding, name_len; };
+struct GlRegisterUniformLocationArgs { uint32_t program; int32_t client_loc; uint32_t name_len; };
+// type: 0=float 1=int 2=uint; comps: 1..4 (vector size) or matrix dim 2..4 when matrix != 0
+struct GlUniformArgs {
+    int32_t  client_loc;
+    int32_t  count;
+    uint8_t  type;
+    uint8_t  comps;
+    uint8_t  matrix;
+    uint8_t  transpose;
+    uint32_t data_size;
+};
+struct GlBlendEquationSeparateArgs { uint32_t modeRGB, modeAlpha; };
+struct GlPolygonOffsetArgs { float factor, units; };
+struct GlClearDepthArgs { double depth; };
+struct GlBindRenderbufferArgs { uint32_t target, id; };
+struct GlRenderbufferStorageArgs { uint32_t target, internalformat; int32_t width, height; };
+struct GlFramebufferRenderbufferArgs { uint32_t target, attachment, rbtarget, renderbuffer; };
+struct GlTexImage3DArgs {
+    uint32_t target;
+    int32_t  level, internalformat, width, height, depth, border;
+    uint32_t format, type, data_size, reserved;
+    uint64_t pixel_offset;
+};
+struct GlTexSubImage3DArgs {
+    uint32_t target;
+    int32_t  level, xoffset, yoffset, zoffset, width, height, depth;
+    uint32_t format, type, data_size, reserved;
+    uint64_t pixel_offset;
+};
+
 #pragma pack(pop)
 
+static_assert(sizeof(GlUniformArgs) == 16);
 static_assert(sizeof(GlCreateContextPayload) == 24);
 static_assert(sizeof(GlContextResponsePayload) == 140);
 static_assert(sizeof(GlResizePayload) == 8);

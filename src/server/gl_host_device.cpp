@@ -223,8 +223,17 @@ void GlHostDevice::DestroyAttachments() {
 
 bool GlHostDevice::Resize(uint32_t width, uint32_t height) {
     if (!m_glrc) return false;
+    // Keep the application's FBO bindings: a binding of the old host FBO moves to the new one.
+    GLint drawFbo = 0, readFbo = 0;
+    glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &drawFbo);
+    glGetIntegerv(kReadFramebufferBinding, &readFbo);
+    const GLuint oldFbo = m_fbo;
     DestroyAttachments();
     if (!CreateAttachments(width, height)) return false;
+    const GLuint newDraw = (static_cast<GLuint>(drawFbo) == oldFbo) ? m_fbo : static_cast<GLuint>(drawFbo);
+    const GLuint newRead = (static_cast<GLuint>(readFbo) == oldFbo) ? m_fbo : static_cast<GLuint>(readFbo);
+    m_api->bindFramebuffer(0x8CA9 /*GL_DRAW_FRAMEBUFFER*/, newDraw);
+    m_api->bindFramebuffer(kReadFramebuffer, newRead);
     return true;
 }
 
