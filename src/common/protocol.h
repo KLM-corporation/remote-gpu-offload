@@ -36,7 +36,8 @@ enum RgpuFlags : uint16_t {
 enum RgpuClientFlags : uint32_t {
     CLIENT_FLAG_NONE              = 0x0000,
     CLIENT_FLAG_FRAME_COMPRESSION = 0x0001, // Client can decode OP_FRAME_DATA sent with FLAG_COMPRESSED
-    CLIENT_FLAG_API_OPENGL        = 0x0002  // Session speaks the OpenGL opcodes (gl_protocol.h), not Direct3D 11
+    CLIENT_FLAG_API_OPENGL        = 0x0002, // Session speaks the OpenGL opcodes (gl_protocol.h), not Direct3D 11
+    CLIENT_FLAG_VIDEO_H264        = 0x0004  // Client can decode FRAME_CODEC_H264 frames (OpenGL sessions)
 };
 
 // Shader stages bound through the generic OP_STAGE_SET_* opcodes (VS, PS and CS keep their own).
@@ -48,7 +49,8 @@ enum RgpuShaderStage : uint32_t {
 
 // Frame codecs used when OP_FRAME_DATA carries FLAG_COMPRESSED.
 enum RgpuFrameCodec : uint32_t {
-    FRAME_CODEC_RLE_DELTA = 1  // XOR prediction + zero-run/literal tokens (see frame_codec.h)
+    FRAME_CODEC_RLE_DELTA = 1, // XOR prediction + zero-run/literal tokens (see frame_codec.h)
+    FRAME_CODEC_H264      = 2  // H.264 access units, each a u32 length + Annex-B bytes (see video_codec.h)
 };
 
 enum RgpuFrameMode : uint32_t {
@@ -174,6 +176,13 @@ struct HandshakeRequestPayload {
     uint32_t preferred_format;   // DXGI_FORMAT enum (e.g. 28 = DXGI_FORMAT_R8G8B8A8_UNORM)
 };
 using HandshakeRequest = HandshakeRequestPayload;
+
+// May follow HandshakeRequestPayload when CLIENT_FLAG_VIDEO_H264 is set (a server that reads only
+// the base payload ignores it).
+struct HandshakeVideoPayload {
+    uint32_t bitrate_kbps;       // H.264 target bitrate, 0 = the server's default
+    uint32_t reserved;           // 0
+};
 
 struct HandshakeResponsePayload {
     uint32_t protocol_version;   // Confirmed server protocol version
@@ -666,6 +675,9 @@ struct ResizeBuffersPayload {
 
 // With FLAG_COMPRESSED, FrameDataPayload is followed by this header and the codec token stream;
 // FrameDataPayload::data_size then counts both. Without the flag, raw pixels follow as before.
+// FRAME_CODEC_H264 frames carry the access units the encoder produced for this swap: usually one,
+// none when it is still busy (the previous picture stays on screen); mode is FRAME_MODE_KEY when
+// one of them is an IDR picture.
 struct CompressedFrameHeader {
     uint32_t codec;               // RgpuFrameCodec
     uint32_t mode;                // RgpuFrameMode
@@ -683,6 +695,7 @@ static_assert(std::is_standard_layout_v<PacketHeader>, "PacketHeader must have s
 static_assert(std::is_trivially_copyable_v<PacketHeader>, "PacketHeader must be trivially copyable");
 
 static_assert(sizeof(HandshakeRequestPayload) == 20);
+static_assert(sizeof(HandshakeVideoPayload) == 8);
 static_assert(sizeof(HandshakeResponsePayload) == 160);
 static_assert(sizeof(ShutdownPayload) == 4);
 

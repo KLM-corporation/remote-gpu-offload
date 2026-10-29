@@ -49,13 +49,7 @@ void GdiPresenter::ConvertRgbaToBgra(const uint8_t* src, uint8_t* dst, size_t pi
     }
 }
 
-bool GdiPresenter::PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t width, uint32_t height, uint32_t /*row_pitch*/) {
-    if (!hwnd || !IsWindow(hwnd) || !rgba_data || width == 0 || height == 0) {
-        return false;
-    }
-
-    auto t_start = std::chrono::high_resolution_clock::now();
-
+bool GdiPresenter::BlitBgra(HWND hwnd, const uint8_t* bgra, uint32_t width, uint32_t height) {
     HDC hdc = GetDC(hwnd);
     if (!hdc) {
         return false;
@@ -63,55 +57,58 @@ bool GdiPresenter::PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t wi
 
     RECT clientRect = {};
     GetClientRect(hwnd, &clientRect);
-    int clientWidth = clientRect.right - clientRect.left;
-    int clientHeight = clientRect.bottom - clientRect.top;
+    const int clientWidth = clientRect.right - clientRect.left;
+    const int clientHeight = clientRect.bottom - clientRect.top;
 
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = static_cast<LONG>(width);
+    bi.bmiHeader.biHeight = -static_cast<LONG>(height); // Top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    bi.bmiHeader.biSizeImage = width * height * 4;
+
+    int lines = 0;
+    if (clientWidth == static_cast<int>(width) && clientHeight == static_cast<int>(height)) {
+        lines = SetDIBitsToDevice(hdc, 0, 0, width, height, 0, 0, 0, height, bgra, &bi, DIB_RGB_COLORS);
+    } else {
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        lines = StretchDIBits(hdc, 0, 0, clientWidth, clientHeight, 0, 0, width, height, bgra, &bi,
+                              DIB_RGB_COLORS, SRCCOPY);
+    }
+    ReleaseDC(hwnd, hdc);
+    return lines > 0;
+}
+
+bool GdiPresenter::PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t width, uint32_t height, uint32_t /*row_pitch*/) {
+    if (!hwnd || !IsWindow(hwnd) || !rgba_data || width == 0 || height == 0) {
+        return false;
+    }
+
+    auto t_start = std::chrono::high_resolution_clock::now();
     bool blit_result = false;
-    const uint8_t* pPixelsToBlit = rgba_data;
 
     if (m_forceBgraConversion) {
+        // Converting here and blitting GDI's native layout is far faster than letting GDI
+        // convert through BI_BITFIELDS masks.
         size_t totalBytes = static_cast<size_t>(width) * height * 4;
         if (m_conversionBuffer.size() < totalBytes) {
             m_conversionBuffer.resize(totalBytes);
         }
         ConvertRgbaToBgra(rgba_data, m_conversionBuffer.data(), static_cast<size_t>(width) * height);
-        pPixelsToBlit = m_conversionBuffer.data();
-
-        BITMAPINFO bi = {};
-        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bi.bmiHeader.biWidth = static_cast<LONG>(width);
-        bi.bmiHeader.biHeight = -static_cast<LONG>(height); // Top-down
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB;
-        bi.bmiHeader.biSizeImage = static_cast<DWORD>(totalBytes);
-
-        if (clientWidth == static_cast<int>(width) && clientHeight == static_cast<int>(height)) {
-            int lines = SetDIBitsToDevice(
-                hdc,
-                0, 0,
-                width, height,
-                0, 0,
-                0, height,
-                pPixelsToBlit,
-                &bi,
-                DIB_RGB_COLORS
-            );
-            blit_result = (lines > 0);
-        } else {
-            SetStretchBltMode(hdc, COLORONCOLOR);
-            int lines = StretchDIBits(
-                hdc,
-                0, 0, clientWidth, clientHeight,
-                0, 0, width, height,
-                pPixelsToBlit,
-                &bi,
-                DIB_RGB_COLORS,
-                SRCCOPY
-            );
-            blit_result = (lines > 0);
-        }
+        blit_result = BlitBgra(hwnd, m_conversionBuffer.data(), width, height);
     } else {
+        HDC hdc = GetDC(hwnd);
+        if (!hdc) {
+            return false;
+        }
+
+        RECT clientRect = {};
+        GetClientRect(hwnd, &clientRect);
+        int clientWidth = clientRect.right - clientRect.left;
+        int clientHeight = clientRect.bottom - clientRect.top;
+
         DibInfoBitfields dib = {};
         dib.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         dib.bmiHeader.biWidth = static_cast<LONG>(width);
@@ -133,7 +130,7 @@ bool GdiPresenter::PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t wi
                 width, height,
                 0, 0,
                 0, height,
-                pPixelsToBlit,
+                rgba_data,
                 reinterpret_cast<const BITMAPINFO*>(&dib),
                 DIB_RGB_COLORS
             );
@@ -144,16 +141,15 @@ bool GdiPresenter::PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t wi
                 hdc,
                 0, 0, clientWidth, clientHeight,
                 0, 0, width, height,
-                pPixelsToBlit,
+                rgba_data,
                 reinterpret_cast<const BITMAPINFO*>(&dib),
                 DIB_RGB_COLORS,
                 SRCCOPY
             );
             blit_result = (lines > 0);
         }
+        ReleaseDC(hwnd, hdc);
     }
-
-    ReleaseDC(hwnd, hdc);
 
     auto t_end = std::chrono::high_resolution_clock::now();
     m_lastPresentMs = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -164,8 +160,21 @@ bool GdiPresenter::PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t wi
     return blit_result;
 }
 
-bool GdiPresenter::Present(HWND hwnd, const uint8_t* rgba_data, uint32_t width, uint32_t height, uint32_t /*format*/) {
-    return PresentFrame(hwnd, rgba_data, width, height, width * 4);
+bool GdiPresenter::Present(HWND hwnd, const uint8_t* rgba_data, uint32_t width, uint32_t height, uint32_t format) {
+    constexpr uint32_t kFormatBgra8 = 87; // DXGI_FORMAT_B8G8R8A8_UNORM
+    if (format != kFormatBgra8) {
+        return PresentFrame(hwnd, rgba_data, width, height, width * 4);
+    }
+    if (!hwnd || !IsWindow(hwnd) || !rgba_data || width == 0 || height == 0) {
+        return false;
+    }
+    auto t_start = std::chrono::high_resolution_clock::now();
+    const bool blit_result = BlitBgra(hwnd, rgba_data, width, height);
+    m_lastPresentMs = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_start).count();
+    if (blit_result) {
+        m_presentedFrames++;
+    }
+    return blit_result;
 }
 
 } // namespace RemoteGPU

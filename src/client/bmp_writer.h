@@ -16,8 +16,9 @@
 
 namespace RemoteGPU {
 
-// Writes a top-down 32-bit BMP from an RGBA buffer (used by the automated pixel verifier).
-inline bool WriteBmp(const char* path, const uint8_t* rgba, uint32_t width, uint32_t height) {
+// Writes a top-down 32-bit BMP from an RGBA buffer, or a BGRA one when `bgra` is set (used by the
+// automated pixel verifier).
+inline bool WriteBmp(const char* path, const uint8_t* rgba, uint32_t width, uint32_t height, bool bgra = false) {
     FILE* f = std::fopen(path, "wb");
     if (!f) return false;
     const uint32_t image_size = width * height * 4;
@@ -38,6 +39,10 @@ inline bool WriteBmp(const char* path, const uint8_t* rgba, uint32_t width, uint
     std::vector<uint8_t> row(width * 4);
     for (uint32_t y = 0; y < height; ++y) {
         const uint8_t* src = rgba + static_cast<size_t>(y) * width * 4;
+        if (bgra) {
+            std::fwrite(src, row.size(), 1, f); // already the BMP byte order
+            continue;
+        }
         for (uint32_t x = 0; x < width; ++x) {
             row[x * 4 + 0] = src[x * 4 + 2];
             row[x * 4 + 1] = src[x * 4 + 1];

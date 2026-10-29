@@ -45,9 +45,10 @@ public:
     // Recreates the offscreen framebuffer attachments at a new size.
     bool Resize(uint32_t width, uint32_t height);
 
-    // Reads the framebuffer as top-down RGBA8 (width * height * 4 bytes), leaving the
-    // application's pixel-pack and framebuffer bindings untouched.
-    bool ReadbackFrame(std::vector<uint8_t>& out);
+    // Reads the framebuffer as top-down BGRA8 (width * height * 4 bytes, the byte order GDI blits
+    // without conversion), or bottom-up as OpenGL stores it (one copy less) without `top_down`,
+    // leaving the application's pixel-pack and framebuffer bindings untouched.
+    bool ReadbackFrame(std::vector<uint8_t>& out, bool top_down = true);
 
     bool IsValid() const noexcept { return m_glrc != nullptr; }
     uint32_t Width() const noexcept { return m_width; }

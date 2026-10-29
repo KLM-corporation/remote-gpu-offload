@@ -9,6 +9,10 @@
 
 namespace RemoteGPU {
 
+// FrameDataPayload::format values (DXGI_FORMAT numbering, shared with the Direct3D path).
+inline constexpr uint32_t FRAME_FORMAT_RGBA8 = 28; // DXGI_FORMAT_R8G8B8A8_UNORM
+inline constexpr uint32_t FRAME_FORMAT_BGRA8 = 87; // DXGI_FORMAT_B8G8R8A8_UNORM: GDI's own byte order
+
 // Largest host framebuffer an OpenGL session may request, per side.
 inline constexpr uint32_t GL_MAX_FRAMEBUFFER_DIM = 8192;
 
@@ -119,7 +123,12 @@ enum GlFunc : uint16_t {
     GLF_DrawArraysInstancedBaseInstance = 86, // GlDrawArraysInstancedBaseInstanceArgs
     GLF_DrawElementsInstancedBaseVertexBaseInstance = 87, // GlDrawElementsInstancedBaseVertexBaseInstanceArgs
     GLF_FramebufferTextureLayer = 88, // GlFramebufferTextureLayerArgs
-    GLF_FramebufferTexture = 89       // GlFramebufferTextureArgs
+    GLF_FramebufferTexture = 89,      // GlFramebufferTextureArgs
+
+    // Texture buffers & indexed capabilities
+    GLF_TexBuffer = 90,               // GlTexBufferArgs
+    GLF_Enablei = 91,                 // GlCapIndexArgs
+    GLF_Disablei = 92                 // GlCapIndexArgs
 };
 
 #pragma pack(push, 1)
@@ -205,6 +214,8 @@ struct GlBindFramebufferArgs { uint32_t target, id; };
 struct GlFramebufferTexture2DArgs { uint32_t target, attachment, textarget, texture; int32_t level; };
 struct GlFramebufferTextureLayerArgs { uint32_t target, attachment, texture; int32_t level, layer; };
 struct GlFramebufferTextureArgs { uint32_t target, attachment, texture; int32_t level; };
+struct GlTexBufferArgs { uint32_t target, internalformat, buffer; };
+struct GlCapIndexArgs { uint32_t cap, index; };
 struct GlBlitFramebufferArgs {
     int32_t  srcX0, srcY0, srcX1, srcY1;
     int32_t  dstX0, dstY0, dstX1, dstY1;
@@ -360,6 +371,8 @@ static_assert(sizeof(GlMultiDrawElementsIndirectArgs) == 24);
 static_assert(sizeof(GlDrawArraysInstancedBaseInstanceArgs) == 24);
 static_assert(sizeof(GlDrawElementsInstancedBaseVertexBaseInstanceArgs) == 40);
 static_assert(sizeof(GlUniformArgs) == 16);
+static_assert(sizeof(GlTexBufferArgs) == 12);
+static_assert(sizeof(GlCapIndexArgs) == 8);
 static_assert(sizeof(GlCreateContextPayload) == 24);
 static_assert(sizeof(GlContextResponsePayload) == 140);
 static_assert(sizeof(GlResizePayload) == 8);

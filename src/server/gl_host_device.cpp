@@ -237,7 +237,7 @@ bool GlHostDevice::Resize(uint32_t width, uint32_t height) {
     return true;
 }
 
-bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out) {
+bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out, bool top_down) {
     if (!m_glrc || m_width == 0 || m_height == 0 || !m_api) return false;
 
     GLint old_read_fbo = 0, old_pack_buffer = 0, old_alignment = 4, old_row_length = 0;
@@ -252,17 +252,18 @@ bool GlHostDevice::ReadbackFrame(std::vector<uint8_t>& out) {
     glPixelStorei(kPackRowLength, 0);
 
     const size_t row_bytes = static_cast<size_t>(m_width) * 4;
-    m_bottomUp.resize(row_bytes * m_height);
+    std::vector<uint8_t>& rows = top_down ? m_bottomUp : out; // OpenGL returns the bottom row first
+    rows.resize(row_bytes * m_height);
     while (glGetError() != GL_NO_ERROR); // Drain any prior error from application draw/state calls
     glReadPixels(0, 0, static_cast<GLsizei>(m_width), static_cast<GLsizei>(m_height),
-                 GL_RGBA, GL_UNSIGNED_BYTE, m_bottomUp.data());
+                 0x80E1 /*GL_BGRA*/, GL_UNSIGNED_BYTE, rows.data());
     const bool ok = glGetError() == GL_NO_ERROR;
 
     glPixelStorei(kPackAlignment, old_alignment);
     glPixelStorei(kPackRowLength, old_row_length);
     m_api->bindBuffer(kPixelPackBuffer, static_cast<GLuint>(old_pack_buffer));
     m_api->bindFramebuffer(kReadFramebuffer, static_cast<GLuint>(old_read_fbo));
-    if (!ok) return false;
+    if (!ok || !top_down) return ok;
 
     out.resize(m_bottomUp.size());
     for (uint32_t y = 0; y < m_height; ++y) {

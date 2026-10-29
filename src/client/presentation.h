@@ -47,7 +47,8 @@ public:
     bool PresentFrame(HWND hwnd, const uint8_t* rgba_data, uint32_t width, uint32_t height, uint32_t row_pitch = 0);
 
     /**
-     * @brief Alternative presentation signature accepting DXGI format.
+     * @brief Alternative presentation signature accepting DXGI format: 87 (B8G8R8A8, GDI's own
+     * order) is blitted as it is, anything else goes through PresentFrame.
      */
     bool Present(HWND hwnd, const uint8_t* rgba_data, uint32_t width, uint32_t height, uint32_t format = 28);
 
@@ -66,6 +67,9 @@ public:
 
 private:
     static void ConvertRgbaToBgra(const uint8_t* src, uint8_t* dst, size_t pixel_count);
+    // Blits 32-bit BGRA pixels (GDI's native layout, no per-pixel conversion), stretched to the
+    // client area when the sizes differ.
+    static bool BlitBgra(HWND hwnd, const uint8_t* bgra, uint32_t width, uint32_t height);
 
     HWND                 m_hwnd{nullptr};
     uint32_t             m_width{0};

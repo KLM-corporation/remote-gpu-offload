@@ -28,11 +28,13 @@ import verify_pixels  # noqa: E402
 BUILD_COMMANDS = [
     ["-std=c++17", "-O2", "-Isrc/common", "-Isrc/server",
      "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/server/gpu_device.cpp", "src/server/server_dispatcher.cpp",
-     "src/server/gl_host_device.cpp", "src/server/gl_server_dispatcher.cpp", "src/server/main_server.cpp", "-o", "{build}/server.exe",
-     "-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler", "-lopengl32", "-lgdi32"],
+     "src/server/gl_host_device.cpp", "src/server/gl_server_dispatcher.cpp", "src/server/main_server.cpp",
+     "src/common/video_codec.cpp", "-o", "{build}/server.exe",
+     "-ld3d11", "-ldxgi", "-lws2_32", "-ld3dcompiler", "-lopengl32", "-lgdi32", "-lole32"],
     ["-shared", "-static", "-std=c++17", "-O2", "-Isrc/common", "-Isrc/client", "src/common/transport.cpp",
-     "src/common/frame_codec.cpp", "src/client/presentation.cpp", "src/client/gl_session.cpp", "src/client/gl_wrapper.cpp",
-     "src/client/opengl32.def", "-o", "{build}/client/opengl32.dll", "-lws2_32", "-lgdi32", "-lopengl32"],
+     "src/common/frame_codec.cpp", "src/common/video_codec.cpp", "src/client/presentation.cpp", "src/client/gl_session.cpp",
+     "src/client/gl_wrapper.cpp", "src/client/opengl32.def", "-o", "{build}/client/opengl32.dll",
+     "-lws2_32", "-lgdi32", "-lopengl32", "-lole32"],
     ["-shared", "-static", "-std=c++17", "-O2", "-Isrc/common", "-Isrc/client",
      "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/client/presentation.cpp", "src/client/proxy_device.cpp",
      "src/client/proxy_context.cpp", "src/client/proxy_swapchain.cpp", "src/client/proxy_dxgi.cpp",
@@ -46,8 +48,10 @@ BUILD_COMMANDS = [
     ["-std=c++17", "-O2", "-static", "tests/test_gl_clear.cpp", "-o", "{build}/client/test_gl_clear.exe",
      "-lopengl32", "-lgdi32", "-luser32"],
     ["-std=c++17", "-O2", "-static", "-Isrc/common", "-Isrc/server", "tests/test_gl_server.cpp",
-     "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/server/gl_host_device.cpp",
-     "src/server/gl_server_dispatcher.cpp", "-o", "{build}/test_gl_server.exe", "-lws2_32", "-lopengl32", "-lgdi32"],
+     "src/common/transport.cpp", "src/common/frame_codec.cpp", "src/common/video_codec.cpp", "src/server/gl_host_device.cpp",
+     "src/server/gl_server_dispatcher.cpp", "-o", "{build}/test_gl_server.exe", "-lws2_32", "-lopengl32", "-lgdi32", "-lole32"],
+    ["-std=c++17", "-O2", "-static", "-Isrc/common", "tests/test_video_codec.cpp", "src/common/video_codec.cpp",
+     "-o", "{build}/test_video_codec.exe", "-lole32"],
 ]
 
 
@@ -198,6 +202,12 @@ def main(argv=None):
             frames.group(0) if frames else "no frame count in server log")
     r.check("Status: Normal" in log, "session ended normally on the server")
 
+    print("[runner] running H.264 video codec tests")
+    video_test = subprocess.run([str(build_dir / "test_video_codec.exe")], cwd=build_dir, capture_output=True,
+                                text=True, timeout=args.timeout)
+    print("    " + "\n    ".join((video_test.stdout + video_test.stderr).strip().splitlines()))
+    r.check(video_test.returncode == 0, "H.264 video codec tests", f"code {video_test.returncode}")
+
     print("[runner] running OpenGL protocol tests")
     gl_server_test = subprocess.run([str(gl_server_test_exe), str(args.port + 100)],
                                     cwd=build_dir, capture_output=True, text=True, timeout=args.timeout)
@@ -227,6 +237,8 @@ def main(argv=None):
     finally:
         stop(gl_server)
         gl_pump.join(5)
+    encoder = re.search(r'H\.264 frames from "([^"]+)"', gl_log.read_text(encoding="utf-8", errors="replace"))
+    r.check(bool(encoder), "OpenGL server sent H.264 frames", encoder.group(1) if encoder else "no encoder line in the log")
 
     print("[runner] verifying captured frames")
     if gl_capture.exists():

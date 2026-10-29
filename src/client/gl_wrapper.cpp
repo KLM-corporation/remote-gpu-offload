@@ -15,7 +15,9 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -35,6 +37,10 @@ using namespace RemoteGPU;
 namespace {
 
 std::ofstream g_logFile;
+
+// Bytes mapped for writing and bytes actually sent at glUnmapBuffer (only the changed span travels).
+std::atomic<uint64_t> g_unmapMappedBytes{0};
+std::atomic<uint64_t> g_unmapSentBytes{0};
 std::mutex g_logMutex;
 
 void Log(const char* fmt, ...) {
@@ -121,7 +127,14 @@ bool DoSwapBuffers(HDC hdc) {
     if (!ctx || t_currentDc != hdc) return false;
     HWND hwnd = WindowFromDC(hdc);
     if (hwnd) ctx->hwnd = hwnd;
-    return ctx->session.Swap(ctx->hwnd);
+    const bool ok = ctx->session.Swap(ctx->hwnd);
+    const std::string report = ctx->session.TakePerfReport();
+    if (!report.empty()) {
+        const uint64_t mapped = g_unmapMappedBytes.exchange(0);
+        const uint64_t sent = g_unmapSentBytes.exchange(0);
+        Log("[RemoteGPU] %s; glUnmapBuffer sent %.0f of %.0f KB mapped", report.c_str(), sent / 1024.0, mapped / 1024.0);
+    }
+    return ok;
 }
 
 HGLRC CreateContextInternal(const GlCreateContextPayload& request) {
@@ -389,6 +402,9 @@ const unsigned char* WINAPI glGetStringi(unsigned name, unsigned index) {
     return reinterpret_cast<const unsigned char*>("");
 }
 
+// The client keeps a copy of every buffer: mapping returns a pointer into it, and it always holds
+// what the server's buffer holds (both start zeroed and receive the same writes and copies), so a
+// mapping only needs to send back the bytes the application changed.
 struct ClientBuffer {
     std::vector<uint8_t> storage;
     bool mapped = false;
@@ -396,7 +412,22 @@ struct ClientBuffer {
     bool mapExplicit = false;
     size_t mapOffset = 0;
     size_t mapLength = 0;
+    std::vector<uint8_t> mapSnapshot; // mapped bytes as they were at map time
+    bool mapSnapshotValid = false;
 };
+
+// Finds the span [first, last] where `now` differs from `was`; false when nothing changed.
+static bool ChangedSpan(const uint8_t* now, const uint8_t* was, size_t len, size_t& first, size_t& last) {
+    constexpr size_t kBlock = 4096;
+    first = 0;
+    while (first + kBlock <= len && std::memcmp(now + first, was + first, kBlock) == 0) first += kBlock;
+    while (first < len && now[first] == was[first]) ++first;
+    if (first == len) return false;
+    last = len - 1;
+    while (last >= first + kBlock && std::memcmp(now + last + 1 - kBlock, was + last + 1 - kBlock, kBlock) == 0) last -= kBlock;
+    while (last > first && now[last] == was[last]) --last;
+    return true;
+}
 static std::map<unsigned, ClientBuffer> g_clientBuffers;
 static std::map<unsigned, unsigned> g_currentBoundBuffers;
 static std::mutex g_bufferMutex;
@@ -407,6 +438,9 @@ static unsigned g_currentProgram = 0;
 static unsigned g_currentVao = 0;
 static unsigned g_currentActiveTexture = 0x84C0; // GL_TEXTURE0
 static std::map<unsigned, bool> g_enabledCaps;
+// glEnablei/glDisablei state, keyed by (cap, index), answered locally by glIsEnabledi.
+static std::map<uint64_t, bool> g_enabledIndexedCaps;
+static uint64_t IndexedCapKey(unsigned cap, unsigned index) { return (static_cast<uint64_t>(cap) << 32) | index; }
 
 void WINAPI glGetIntegerv(unsigned pname, int* params) {
     if (!params) return;
@@ -589,7 +623,7 @@ inline bool IsServerBufferTarget(unsigned target) {
            target == 0x88EC /*GL_PIXEL_UNPACK_BUFFER*/ ||
            target == 0x88ED /*GL_PIXEL_PACK_BUFFER*/ ||
            target == 0x8A11 /*GL_UNIFORM_BUFFER*/ ||
-           target == 0x8C2C /*GL_TEXTURE_BUFFER*/ ||
+           target == 0x8C2A /*GL_TEXTURE_BUFFER*/ ||
            target == 0x8C8E /*GL_TRANSFORM_FEEDBACK_BUFFER*/ ||
            target == 0x8F36 /*GL_COPY_READ_BUFFER*/ ||
            target == 0x8F37 /*GL_COPY_WRITE_BUFFER*/ ||
@@ -804,7 +838,8 @@ void WINAPI glGetBooleani_v(unsigned target, unsigned index, unsigned char* data
 }
 
 unsigned char WINAPI glIsEnabledi(unsigned target, unsigned index) {
-    return 0;
+    auto it = g_enabledIndexedCaps.find(IndexedCapKey(target, index));
+    return (it != g_enabledIndexedCaps.end() && it->second) ? 1 : 0;
 }
 
 unsigned WINAPI glGetError() {
@@ -1805,6 +1840,25 @@ void WINAPI glBindBuffer(unsigned target, unsigned buffer) {
     }
 }
 
+// Largest buffer the server accepts, and largest data block sent in one command: bigger uploads
+// (Minecraft allocates 128 MB chunk heaps) are split into several glBufferSubData commands.
+constexpr uint64_t kMaxServerBufferBytes = 2ull * 1024 * 1024 * 1024;
+constexpr size_t kMaxUploadChunk = 16 * 1024 * 1024;
+
+// Queues `size` bytes of `data` for the buffer bound to `target` on the server, from `offset`.
+static void AppendBufferSubData(unsigned target, uint64_t offset, const uint8_t* data, size_t size) {
+    std::vector<uint8_t> payload;
+    for (size_t done = 0; done < size;) {
+        const size_t chunk = std::min(size - done, kMaxUploadChunk);
+        const GlBufferSubDataArgs args = {target, 0, offset + done, static_cast<uint64_t>(chunk)};
+        payload.resize(sizeof(args) + chunk);
+        std::memcpy(payload.data(), &args, sizeof(args));
+        std::memcpy(payload.data() + sizeof(args), data + done, chunk);
+        t_current->session.Append(GLF_BufferSubData, payload.data(), static_cast<uint32_t>(payload.size()));
+        done += chunk;
+    }
+}
+
 void WINAPI glBufferData(unsigned target, ptrdiff_t size, const void* data, unsigned usage) {
     {
         std::lock_guard<std::mutex> lock(g_bufferMutex);
@@ -1819,14 +1873,22 @@ void WINAPI glBufferData(unsigned target, ptrdiff_t size, const void* data, unsi
             }
         }
     }
-    if (!t_current || size < 0 || static_cast<uint64_t>(size) > 64 * 1024 * 1024) return;
-    if (IsServerBufferTarget(target)) {
-        const GlBufferDataArgs args = {target, usage, static_cast<uint64_t>(size)};
-        const size_t byte_count = data ? static_cast<size_t>(size) : 0;
-        std::vector<uint8_t> payload(sizeof(args) + byte_count);
-        std::memcpy(payload.data(), &args, sizeof(args));
-        if (data && byte_count) std::memcpy(payload.data() + sizeof(args), data, byte_count);
-        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    if (!t_current || size < 0 || !IsServerBufferTarget(target)) return;
+    if (static_cast<uint64_t>(size) > kMaxServerBufferBytes) {
+        Log("[ERROR] glBufferData of %td bytes is larger than the server accepts; not sent", size);
+        return;
+    }
+    // The allocation always reaches the server, whatever its size; the contents travel inline only
+    // when small, otherwise in chunks right behind it.
+    const bool inline_data = data && static_cast<size_t>(size) <= kMaxUploadChunk;
+    const GlBufferDataArgs args = {target, usage, static_cast<uint64_t>(size)};
+    const size_t inline_bytes = inline_data ? static_cast<size_t>(size) : 0;
+    std::vector<uint8_t> payload(sizeof(args) + inline_bytes);
+    std::memcpy(payload.data(), &args, sizeof(args));
+    if (inline_bytes) std::memcpy(payload.data() + sizeof(args), data, inline_bytes);
+    t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
+    if (data && !inline_data) {
+        AppendBufferSubData(target, 0, static_cast<const uint8_t*>(data), static_cast<size_t>(size));
     }
 }
 
@@ -1843,12 +1905,9 @@ void WINAPI glBufferSubData(unsigned target, ptrdiff_t offset, ptrdiff_t size, c
             std::memcpy(buf.storage.data() + offset, data, static_cast<size_t>(size));
         }
     }
-    if (t_current && data && size > 0 && offset >= 0 && size <= 64 * 1024 * 1024) {
-        const GlBufferSubDataArgs args = {target, 0, static_cast<uint64_t>(offset), static_cast<uint64_t>(size)};
-        std::vector<uint8_t> payload(sizeof(args) + static_cast<size_t>(size));
-        std::memcpy(payload.data(), &args, sizeof(args));
-        std::memcpy(payload.data() + sizeof(args), data, static_cast<size_t>(size));
-        t_current->session.Append(GLF_BufferSubData, payload.data(), static_cast<uint32_t>(payload.size()));
+    if (t_current && data && size > 0 && offset >= 0) {
+        AppendBufferSubData(target, static_cast<uint64_t>(offset), static_cast<const uint8_t*>(data),
+                            static_cast<size_t>(size));
     }
 }
 
@@ -1884,22 +1943,19 @@ void WINAPI glDeleteBuffers(int count, const unsigned* buffers) {
 }
 
 static void SendBufferRange(unsigned target, unsigned id, size_t off, size_t len) {
-    if (!t_current || len == 0 || len > 64 * 1024 * 1024) return;
-    std::vector<uint8_t> payload;
+    if (!t_current || len == 0) return;
+    std::vector<uint8_t> bytes;
     {
         std::lock_guard<std::mutex> lock(g_bufferMutex);
         auto it = g_clientBuffers.find(id);
         if (it == g_clientBuffers.end() || it->second.storage.size() < off + len) return;
-        const GlBufferSubDataArgs args = {target, 0, static_cast<uint64_t>(off), static_cast<uint64_t>(len)};
-        payload.resize(sizeof(args) + len);
-        std::memcpy(payload.data(), &args, sizeof(args));
-        std::memcpy(payload.data() + sizeof(args), it->second.storage.data() + off, len);
+        bytes.assign(it->second.storage.data() + off, it->second.storage.data() + off + len);
     }
     if (id != 0) {
         const GlBindBufferArgs bindArgs = {target, id};
         t_current->session.Append(GLF_BindBuffer, &bindArgs, sizeof(bindArgs));
     }
-    t_current->session.Append(GLF_BufferSubData, payload.data(), static_cast<uint32_t>(payload.size()));
+    AppendBufferSubData(target, off, bytes.data(), bytes.size());
 }
 
 void* WINAPI glMapBufferRange(unsigned target, ptrdiff_t offset, ptrdiff_t length, unsigned access) {
@@ -1917,6 +1973,12 @@ void* WINAPI glMapBufferRange(unsigned target, ptrdiff_t offset, ptrdiff_t lengt
         buf.mapLength = static_cast<size_t>(length);
         buf.mapWrite = (access & 0x0002 /*GL_MAP_WRITE_BIT*/) != 0;
         buf.mapExplicit = (access & 0x0010 /*GL_MAP_FLUSH_EXPLICIT_BIT*/) != 0;
+        // Applications map a whole ring buffer and fill a small part of it: remember the bytes so
+        // that glUnmapBuffer sends only what changed (bounded so the copy stays cheap).
+        buf.mapSnapshotValid = buf.mapWrite && !buf.mapExplicit && buf.mapLength <= kMaxUploadChunk;
+        if (buf.mapSnapshotValid) {
+            buf.mapSnapshot.assign(buf.storage.begin() + offset, buf.storage.begin() + offset + length);
+        }
         return buf.storage.data() + offset;
     }
     static std::vector<uint8_t> fallback(16 * 1024 * 1024);
@@ -1942,7 +2004,16 @@ unsigned char WINAPI glUnmapBuffer(unsigned target) {
                 off = b.mapOffset;
                 len = b.mapLength;
                 send = true;
+                size_t first = 0, last = 0;
+                if (b.mapSnapshotValid && b.mapSnapshot.size() == len && off + len <= b.storage.size()) {
+                    send = ChangedSpan(b.storage.data() + off, b.mapSnapshot.data(), len, first, last);
+                    off += first;
+                    len = last - first + 1;
+                }
+                g_unmapMappedBytes += b.mapLength;
+                if (send) g_unmapSentBytes += len;
             }
+            b.mapSnapshotValid = false;
         }
     }
     if (send) SendBufferRange(target, boundId, off, len);
@@ -2199,6 +2270,14 @@ void WINAPI glCopyBufferSubData(unsigned readTarget, unsigned writeTarget,
                                 static_cast<size_t>(size));
                 }
             }
+        } else if (readId && readId == writeId) {
+            // A copy inside one buffer (ranges may overlap only in invalid GL use; memmove is safe).
+            auto it = g_clientBuffers.find(readId);
+            if (it != g_clientBuffers.end() &&
+                it->second.storage.size() >= static_cast<size_t>(std::max(readOffset, writeOffset) + size)) {
+                std::memmove(it->second.storage.data() + writeOffset, it->second.storage.data() + readOffset,
+                             static_cast<size_t>(size));
+            }
         }
     }
     if (t_current) {
@@ -2252,10 +2331,20 @@ void WINAPI glClipControl(unsigned origin, unsigned depth) {
 
 void WINAPI glDisablei(unsigned cap, unsigned index) {
     Log("[GL] glDisablei(cap: 0x%X, index: %u)", cap, index);
+    g_enabledIndexedCaps[IndexedCapKey(cap, index)] = false;
+    if (t_current) {
+        GlCapIndexArgs args = {cap, index};
+        t_current->session.Append(GLF_Disablei, &args, sizeof(args));
+    }
 }
 
 void WINAPI glEnablei(unsigned cap, unsigned index) {
     Log("[GL] glEnablei(cap: 0x%X, index: %u)", cap, index);
+    g_enabledIndexedCaps[IndexedCapKey(cap, index)] = true;
+    if (t_current) {
+        GlCapIndexArgs args = {cap, index};
+        t_current->session.Append(GLF_Enablei, &args, sizeof(args));
+    }
 }
 
 void WINAPI glLogicOp(unsigned opcode) {
@@ -2486,6 +2575,10 @@ void WINAPI glVertexBindingDivisor(unsigned bindingindex, unsigned divisor) {
 
 void WINAPI glTexBuffer(unsigned target, unsigned internalformat, unsigned buffer) {
     Log("[GL] glTexBuffer(target: 0x%X, internalformat: 0x%X, buffer: %u)", target, internalformat, buffer);
+    if (t_current) {
+        GlTexBufferArgs args = {target, internalformat, buffer};
+        t_current->session.Append(GLF_TexBuffer, &args, sizeof(args));
+    }
 }
 
 void WINAPI glCreateBuffers(int n, unsigned* buffers) {

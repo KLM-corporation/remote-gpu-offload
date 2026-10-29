@@ -2,6 +2,8 @@
 
 #include <GL/gl.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -85,6 +87,9 @@ using MultiDrawArraysIndirectFn = void(WINAPI*)(GLenum, const void*, GLsizei, GL
 using MultiDrawElementsIndirectFn = void(WINAPI*)(GLenum, GLenum, const void*, GLsizei, GLsizei);
 using DrawArraysInstancedBaseInstanceFn = void(WINAPI*)(GLenum, GLint, GLsizei, GLsizei, GLuint);
 using DrawElementsInstancedBaseVertexBaseInstanceFn = void(WINAPI*)(GLenum, GLsizei, GLenum, const void*, GLsizei, GLint, GLuint);
+using TexBufferFn = void(WINAPI*)(GLenum, GLenum, GLuint);
+using ClearBufferDataFn = void(WINAPI*)(GLenum, GLenum, GLenum, GLenum, const void*);
+using CapIndexFn = void(WINAPI*)(GLenum, GLuint);
 
 struct GlDispatchApi {
     BindAttribLocationFn bindAttribLocation = nullptr;
@@ -114,6 +119,10 @@ struct GlDispatchApi {
     MultiDrawElementsIndirectFn multiDrawElementsIndirect = nullptr;
     DrawArraysInstancedBaseInstanceFn drawArraysInstancedBaseInstance = nullptr;
     DrawElementsInstancedBaseVertexBaseInstanceFn drawElementsInstancedBaseVertexBaseInstance = nullptr;
+    TexBufferFn texBuffer = nullptr;
+    ClearBufferDataFn clearBufferData = nullptr;
+    CapIndexFn enablei = nullptr;
+    CapIndexFn disablei = nullptr;
 
     GenBuffersFn genBuffers = nullptr;
     BindBufferFn bindBuffer = nullptr;
@@ -170,6 +179,11 @@ constexpr int32_t  kMaxViewportDim = 32768;
 constexpr GLenum kArrayBuffer = 0x8892;
 constexpr GLenum kElementArrayBuffer = 0x8893;
 constexpr GLenum kUniformBuffer = 0x8A11;
+constexpr GLenum kTextureBuffer = 0x8C2A;
+// Largest buffer a client may allocate, and largest data block carried inline by one command
+// (bigger uploads arrive as several glBufferSubData commands).
+constexpr uint64_t kMaxBufferBytes = 2ull * 1024 * 1024 * 1024;
+constexpr uint64_t kMaxInlineBufferBytes = 64ull * 1024 * 1024;
 
 inline bool IsValidBufferTarget(GLenum target) {
     return target == 0x8892 /*GL_ARRAY_BUFFER*/ ||
@@ -177,7 +191,7 @@ inline bool IsValidBufferTarget(GLenum target) {
            target == 0x88EC /*GL_PIXEL_UNPACK_BUFFER*/ ||
            target == 0x88ED /*GL_PIXEL_PACK_BUFFER*/ ||
            target == 0x8A11 /*GL_UNIFORM_BUFFER*/ ||
-           target == 0x8C2C /*GL_TEXTURE_BUFFER*/ ||
+           target == 0x8C2A /*GL_TEXTURE_BUFFER*/ ||
            target == 0x8C8E /*GL_TRANSFORM_FEEDBACK_BUFFER*/ ||
            target == 0x8F36 /*GL_COPY_READ_BUFFER*/ ||
            target == 0x8F37 /*GL_COPY_WRITE_BUFFER*/ ||
@@ -309,6 +323,10 @@ bool GlServerDispatcher::LoadGlApi() {
     LoadGl(m_gl->multiDrawElementsIndirect, "glMultiDrawElementsIndirect");
     LoadGl(m_gl->drawArraysInstancedBaseInstance, "glDrawArraysInstancedBaseInstance");
     LoadGl(m_gl->drawElementsInstancedBaseVertexBaseInstance, "glDrawElementsInstancedBaseVertexBaseInstance");
+    LoadGl(m_gl->texBuffer, "glTexBuffer");
+    LoadGl(m_gl->clearBufferData, "glClearBufferData");
+    LoadGl(m_gl->enablei, "glEnablei");
+    LoadGl(m_gl->disablei, "glDisablei");
 
     return true;
 }
@@ -329,8 +347,12 @@ bool GlServerDispatcher::ProcessPacketStream(NetworkSocket& socket, const Packet
         }
         if (header.opcode == OP_SHUTDOWN) return true;
         if (!Dispatch(header, payload.data(), payload.size(), socket)) {
-            std::cerr << "[GlServer] Command failed (opcode 0x" << std::hex << header.opcode << std::dec
-                      << "); ending the session." << std::endl;
+            std::cerr << "[GlServer] Command failed (opcode 0x" << std::hex << header.opcode << std::dec;
+            if (header.opcode == OP_GL_COMMANDS) {
+                if (m_lastFunc == 0) std::cerr << ", malformed command header";
+                else std::cerr << ", GL function " << m_lastFunc << " rejected its arguments";
+            }
+            std::cerr << "); ending the session." << std::endl;
             return false;
         }
     }
@@ -347,7 +369,13 @@ bool GlServerDispatcher::Dispatch(const PacketHeader& header, const uint8_t* pay
     if (!m_device.IsValid()) return false;
 
     switch (header.opcode) {
-        case OP_GL_COMMANDS: return ExecuteCommands(payload, size);
+        case OP_GL_COMMANDS: {
+            const auto start = std::chrono::steady_clock::now();
+            const bool ok = ExecuteCommands(payload, size);
+            m_perfExecuteMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            m_perfCommandBytes += size;
+            return ok;
+        }
         case OP_GL_RESIZE:   return HandleResize(payload, size);
         case OP_GL_SWAP:     return HandleSwap(header, payload, size, socket);
         default:
@@ -362,6 +390,11 @@ bool GlServerDispatcher::HandleHandshake(const PacketHeader& header, const uint8
     if ((req.client_flags & CLIENT_FLAG_API_OPENGL) == 0) return false;
 
     m_compression = (req.client_flags & CLIENT_FLAG_FRAME_COMPRESSION) != 0;
+    m_video = (req.client_flags & CLIENT_FLAG_VIDEO_H264) != 0 && Video::IsAvailable();
+    if (size >= sizeof(HandshakeRequestPayload) + sizeof(HandshakeVideoPayload)) {
+        const auto video = ReadArgs<HandshakeVideoPayload>(payload + sizeof(HandshakeRequestPayload));
+        if (video.bitrate_kbps != 0) m_videoKbps = std::clamp<uint32_t>(video.bitrate_kbps, 2000, 200000);
+    }
     m_initialWidth = req.client_width;
     m_initialHeight = req.client_height;
 
@@ -370,7 +403,7 @@ bool GlServerDispatcher::HandleHandshake(const PacketHeader& header, const uint8
     resp.status_code = req.protocol_version == RGPU_PROTOCOL_VERSION ? 0 : 1;
     resp.frame_width = req.client_width;
     resp.frame_height = req.client_height;
-    resp.frame_format = 28; // DXGI_FORMAT_R8G8B8A8_UNORM, the byte order glReadPixels produces
+    resp.frame_format = FRAME_FORMAT_BGRA8; // frames are read back in GDI's byte order
     std::strncpy(resp.adapter_desc, "OpenGL host", sizeof(resp.adapter_desc) - 1);
 
     if (!SendReply(socket, OP_HANDSHAKE_RESPONSE, header.sequence_id, &resp, sizeof(resp))) return false;
@@ -413,6 +446,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
     if (!LoadGlApi()) return false;
     size_t pos = 0;
     while (pos < size) {
+        m_lastFunc = 0;
         if (size - pos < sizeof(GlCommandHeader)) return false;
         const auto cmd = ReadArgs<GlCommandHeader>(data + pos);
         pos += sizeof(GlCommandHeader);
@@ -420,6 +454,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
         const uint8_t* args = data + pos;
         pos += cmd.size;
         ++m_commands;
+        m_lastFunc = cmd.func;
 
         switch (cmd.func) {
             case GLF_Clear: {
@@ -498,9 +533,11 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
             case GLF_BufferData: {
                 if (cmd.size < sizeof(GlBufferDataArgs)) return false;
                 const auto a = ReadArgs<GlBufferDataArgs>(args);
-                if (!IsValidBufferTarget(a.target) || a.size > 64 * 1024 * 1024) return false;
-                const bool hasData = (cmd.size == sizeof(a) + a.size);
-                if (!hasData && cmd.size != sizeof(a)) return false;
+                if (!IsValidBufferTarget(a.target) || a.size > kMaxBufferBytes) return false;
+                // Either an allocation alone (Minecraft's 128 MB chunk heaps) or a small buffer with
+                // its contents inline.
+                const bool hasData = cmd.size > sizeof(a);
+                if (hasData && (cmd.size != sizeof(a) + a.size || a.size > kMaxInlineBufferBytes)) return false;
                 auto itBound = m_boundBuffers.find(a.target);
                 if (itBound == m_boundBuffers.end() || itBound->second == 0) return false;
                 auto itBuf = m_buffers.find(itBound->second);
@@ -508,20 +545,24 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 auto& buffer = itBuf->second;
                 buffer.target = a.target;
                 buffer.gpu_size = a.size;
-                if (hasData) {
-                    buffer.data.assign(args + sizeof(a), args + cmd.size);
-                } else {
-                    buffer.data.clear();
-                }
                 m_gl->bindBuffer(a.target, buffer.gl_id);
                 m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(a.size),
-                                 hasData ? buffer.data.data() : nullptr, a.usage);
+                                 hasData ? args + sizeof(a) : nullptr, a.usage);
+                // The client's copy of a new buffer is zeroed; keep both identical, since the client
+                // sends back only the bytes an application changes in a mapping.
+                if (!hasData && a.size > 0 && m_gl->clearBufferData) {
+                    m_gl->clearBufferData(a.target, 0x8229 /*GL_R8*/, 0x1903 /*GL_RED*/, GL_UNSIGNED_BYTE, nullptr);
+                }
                 break;
             }
             case GLF_DeleteBuffer: {
                 if (cmd.size != sizeof(GlIdArgs)) return false;
                 const auto a = ReadArgs<GlIdArgs>(args);
-                m_buffers.erase(a.id);
+                auto itDel = m_buffers.find(a.id);
+                if (itDel != m_buffers.end()) {
+                    if (m_gl->deleteBuffers) m_gl->deleteBuffers(1, &itDel->second.gl_id); // frees the GPU memory
+                    m_buffers.erase(itDel);
+                }
                 if (m_boundArrayBuffer == a.id) m_boundArrayBuffer = 0;
                 for (auto& pair : m_boundBuffers) {
                     if (pair.second == a.id) {
@@ -938,14 +979,19 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (!IsValidBufferTarget(a.target)) return false;
                 if (cmd.size != sizeof(GlBufferSubDataArgs) + a.size) return false;
                 const void* data = args + sizeof(GlBufferSubDataArgs);
-                {
-                    auto itB = m_boundBuffers.find(a.target);
-                    if (itB != m_boundBuffers.end() && itB->second != 0) {
-                        auto itBuf = m_buffers.find(itB->second);
-                        if (itBuf != m_buffers.end() && a.offset + a.size > itBuf->second.gpu_size) {
-                            itBuf->second.gpu_size = a.offset + a.size;
-                            m_gl->bufferData(a.target, static_cast<std::ptrdiff_t>(itBuf->second.gpu_size), nullptr, 0x88E8 /*GL_DYNAMIC_DRAW*/);
+                auto itB = m_boundBuffers.find(a.target);
+                if (itB != m_boundBuffers.end() && itB->second != 0) {
+                    auto itBuf = m_buffers.find(itB->second);
+                    const uint64_t gpu_size = itBuf != m_buffers.end() ? itBuf->second.gpu_size : 0;
+                    if (itBuf != m_buffers.end() && (a.offset > gpu_size || a.size > gpu_size - a.offset)) {
+                        // OpenGL rejects a write past the end of the buffer, and so does this server.
+                        // Growing the buffer instead would reallocate it and wipe everything already
+                        // uploaded (this is what blanked Minecraft's chunk heaps).
+                        if (m_oversizedWrites++ < 8) {
+                            std::cerr << "[GlServer] glBufferSubData past the end of buffer " << itB->second << " (offset "
+                                      << a.offset << " + " << a.size << " > " << gpu_size << " bytes) skipped" << std::endl;
                         }
+                        break;
                     }
                 }
                 if (m_gl->bufferSubData) {
@@ -1320,10 +1366,84 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 }
                 break;
             }
+            case GLF_TexBuffer: {
+                if (cmd.size != sizeof(GlTexBufferArgs)) return false;
+                const auto a = ReadArgs<GlTexBufferArgs>(args);
+                if (a.target != kTextureBuffer) return false;
+                GLuint buf = 0; // buffer 0 detaches the storage from the bound buffer texture
+                if (a.buffer != 0) {
+                    auto it = m_buffers.find(a.buffer);
+                    if (it == m_buffers.end()) return false;
+                    buf = it->second.gl_id;
+                }
+                if (m_gl->texBuffer) m_gl->texBuffer(a.target, a.internalformat, buf);
+                break;
+            }
+            case GLF_Enablei:
+            case GLF_Disablei: {
+                if (cmd.size != sizeof(GlCapIndexArgs)) return false;
+                const auto a = ReadArgs<GlCapIndexArgs>(args);
+                CapIndexFn fn = cmd.func == GLF_Enablei ? m_gl->enablei : m_gl->disablei;
+                if (fn) fn(a.cap, a.index);
+                break;
+            }
             default:
-                return false;
+                // A newer opengl32.dll may send functions this server does not know yet. The
+                // command is well framed, so it is skipped (nothing reaches the driver) and the
+                // rest of the frame still renders instead of the whole session ending.
+                if (m_unknownFuncs.size() < 64 && m_unknownFuncs.insert(cmd.func).second) {
+                    std::cerr << "[GlServer] Unknown GL function " << cmd.func
+                              << " skipped: opengl32.dll is newer than this server.exe, update the server." << std::endl;
+                }
+                break;
         }
     }
+    return true;
+}
+
+// True when this frame goes out as H.264: the client decodes it and an encoder exists, or can be
+// created, for the frame size.
+bool GlServerDispatcher::PrepareVideo(uint32_t width, uint32_t height) {
+    constexpr uint32_t kMinVideoSize = 64; // below this the lossless codec is small anyway
+    // Creating an encoder takes up to a second, so after the first one a new size must hold for
+    // this many frames: a window being dragged to a new size does not stall on every frame.
+    constexpr uint32_t kStableFrames = 30;
+    if (!m_video || width < kMinVideoSize || height < kMinVideoSize) return false;
+    if (m_encoder && m_encoder->IsValid() && m_encoder->Width() == width && m_encoder->Height() == height) return true;
+    if (width == m_videoFailedWidth && height == m_videoFailedHeight) return false;
+    if (width != m_videoPendingWidth || height != m_videoPendingHeight) {
+        m_videoPendingWidth = width;
+        m_videoPendingHeight = height;
+        m_videoPendingFrames = 0;
+    }
+    if (m_encoder && ++m_videoPendingFrames < kStableFrames) return false;
+    if (!m_encoder) m_encoder = std::make_unique<Video::H264Encoder>();
+    if (!m_encoder->Create(width, height, m_videoKbps)) {
+        std::cerr << "[GlServer] No H.264 encoder for " << width << "x" << height << ", sending lossless frames" << std::endl;
+        m_videoFailedWidth = width;
+        m_videoFailedHeight = height;
+        return false;
+    }
+    std::cout << "[GlServer] H.264 frames from \"" << m_encoder->Name() << "\" at " << width << "x" << height << ", "
+              << m_videoKbps / 1000 << " Mbps" << std::endl;
+    return true;
+}
+
+// Encodes the bottom-up frame in m_frame into m_encoded as a FRAME_CODEC_H264 frame. On failure
+// the encoder is dropped and frames of this size go out losslessly.
+bool GlServerDispatcher::EncodeVideo(uint32_t width, uint32_t height) {
+    const ptrdiff_t row = static_cast<ptrdiff_t>(width) * 4;
+    bool key = false;
+    m_encoded.assign(sizeof(CompressedFrameHeader), 0);
+    if (!m_encoder->Encode(m_frame.data() + (height - 1) * row, -row, m_encoded, key)) {
+        std::cerr << "[GlServer] H.264 encoder \"" << m_encoder->Name() << "\" failed, sending lossless frames" << std::endl;
+        m_encoder->Destroy();
+        m_videoFailedWidth = width;
+        m_videoFailedHeight = height;
+        return false;
+    }
+    const CompressedFrameHeader header = {FRAME_CODEC_H264, key ? FRAME_MODE_KEY : FRAME_MODE_DELTA, width * height * 4};
+    std::memcpy(m_encoded.data(), &header, sizeof(header));
     return true;
 }
 
@@ -1331,23 +1451,39 @@ bool GlServerDispatcher::HandleSwap(const PacketHeader& header, const uint8_t* p
                                     NetworkSocket& socket) {
     if (size < sizeof(GlSwapPayload)) return false;
     const auto swap = ReadArgs<GlSwapPayload>(payload);
-
-    if (!m_device.ReadbackFrame(m_frame)) {
-        std::cerr << "[GlServer] Frame readback failed." << std::endl;
-        return false;
-    }
     const uint32_t width = m_device.Width();
     const uint32_t height = m_device.Height();
     const size_t pixel_count = static_cast<size_t>(width) * height;
 
-    // Same wire format as the Direct3D path: compressed when it saves bytes, raw otherwise, and
-    // either way the client ends up holding m_frame, the reference for the next delta frame.
-    bool compressed = false;
-    if (m_compression) {
+    using PerfClock = std::chrono::steady_clock;
+    const auto readback_start = PerfClock::now();
+    // H.264 encodes the rows bottom-up, as OpenGL returns them; the lossless codecs send them top-down.
+    const bool video = PrepareVideo(width, height);
+    if (!m_device.ReadbackFrame(m_frame, !video)) {
+        std::cerr << "[GlServer] Frame readback failed." << std::endl;
+        return false;
+    }
+
+    const auto encode_start = PerfClock::now();
+    const bool sent_video = video && EncodeVideo(width, height);
+    if (video && !sent_video) {
+        // The encoder failed: this frame goes out losslessly instead.
+        const size_t row = static_cast<size_t>(width) * 4;
+        for (uint32_t y = 0; y < height / 2; ++y) {
+            std::swap_ranges(m_frame.begin() + y * row, m_frame.begin() + (y + 1) * row,
+                             m_frame.begin() + (height - 1 - y) * row);
+        }
+    }
+    // Otherwise the same wire format as the Direct3D path: compressed when it saves bytes, raw
+    // otherwise, and either way the client ends up holding m_frame, the reference for the next
+    // delta frame.
+    bool compressed = sent_video;
+    if (!sent_video && m_compression) {
         const bool has_reference = m_previousFrame.size() == m_frame.size();
         FrameCodec::Encode(m_frame.data(), has_reference ? m_previousFrame.data() : nullptr, pixel_count, m_encoded);
         compressed = m_encoded.size() < m_frame.size();
     }
+    const auto send_start = PerfClock::now();
     const std::vector<uint8_t>& body = compressed ? m_encoded : m_frame;
 
     PacketHeader reply = {};
@@ -1360,7 +1496,7 @@ bool GlServerDispatcher::HandleSwap(const PacketHeader& header, const uint8_t* p
     FrameDataPayload meta = {};
     meta.width = width;
     meta.height = height;
-    meta.format = 28;
+    meta.format = FRAME_FORMAT_BGRA8;
     meta.row_pitch = width * 4;
     meta.data_size = static_cast<uint32_t>(body.size());
     meta.frame_number = swap.frame_number;
@@ -1370,10 +1506,35 @@ bool GlServerDispatcher::HandleSwap(const PacketHeader& header, const uint8_t* p
         return false;
     }
 
+    const auto end = PerfClock::now();
+    auto ms = [](PerfClock::time_point a, PerfClock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    m_perfReadbackMs += ms(readback_start, encode_start);
+    m_perfEncodeMs += ms(encode_start, send_start);
+    m_perfSendMs += ms(send_start, end);
+    m_perfFrameBytes += body.size();
     m_rawBytes += m_frame.size();
     m_sentBytes += body.size();
-    if (m_compression) m_previousFrame.swap(m_frame);
+    if (sent_video) {
+        m_previousFrame.clear(); // the client holds a lossy picture: a lossless frame after it is a key frame
+    } else if (m_compression) {
+        m_previousFrame.swap(m_frame);
+    }
     ++m_frames;
+
+    // Per-frame cost of each server stage, averaged over the last 300 frames.
+    constexpr uint64_t kReportEvery = 300;
+    if (m_frames % kReportEvery == 0) {
+        const double n = static_cast<double>(kReportEvery);
+        std::cout << "[GlServer] " << m_frames << " frames at " << width << "x" << height << ": commands "
+                  << static_cast<uint64_t>(m_perfCommandBytes / n / 1024) << " KB in " << m_perfExecuteMs / n
+                  << " ms, readback " << m_perfReadbackMs / n << " ms, encode " << m_perfEncodeMs / n
+                  << " ms, send " << m_perfSendMs / n << " ms, frame " << static_cast<uint64_t>(m_perfFrameBytes / n / 1024)
+                  << " KB" << std::endl;
+        m_perfExecuteMs = m_perfReadbackMs = m_perfEncodeMs = m_perfSendMs = 0.0;
+        m_perfCommandBytes = m_perfFrameBytes = 0;
+    }
     return true;
 }
 

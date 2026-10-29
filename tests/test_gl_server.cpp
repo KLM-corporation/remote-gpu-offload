@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "frame_codec.h"
@@ -68,15 +69,21 @@ public:
     }
     bool Receive(PacketHeader& h, std::vector<uint8_t>& payload) { return m_client.RecvPacket(h, payload); }
 
-    bool Handshake(uint32_t flags = CLIENT_FLAG_API_OPENGL) {
+    // `video_kbps` appends a HandshakeVideoPayload asking for that bitrate.
+    bool Handshake(uint32_t flags = CLIENT_FLAG_API_OPENGL, uint32_t video_kbps = UINT32_MAX) {
         HandshakeRequestPayload hello = {};
         hello.protocol_version = RGPU_PROTOCOL_VERSION;
         hello.client_flags = flags;
         hello.client_width = 64;
         hello.client_height = 48;
+        const HandshakeVideoPayload video = {video_kbps, 0};
+        uint8_t bytes[sizeof(hello) + sizeof(video)];
+        std::memcpy(bytes, &hello, sizeof(hello));
+        std::memcpy(bytes + sizeof(hello), &video, sizeof(video));
+        const uint32_t size = static_cast<uint32_t>(sizeof(hello) + (video_kbps != UINT32_MAX ? sizeof(video) : 0));
         PacketHeader h;
         std::vector<uint8_t> p;
-        return Send(OP_HANDSHAKE_REQUEST, &hello, sizeof(hello)) && Receive(h, p) && h.opcode == OP_HANDSHAKE_RESPONSE;
+        return Send(OP_HANDSHAKE_REQUEST, bytes, size) && Receive(h, p) && h.opcode == OP_HANDSHAKE_RESPONSE;
     }
 
     // Returns the context response status, or UINT32_MAX when no response came.
@@ -120,8 +127,120 @@ void ExpectRejected(uint16_t port, const char* label, const std::vector<uint8_t>
     Case c(port);
     bool ok = c.Handshake() && c.CreateContext(64, 48) == 0;
     ok = ok && c.Send(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size()));
+    // A rejected batch ends the session, so the swap that follows gets no frame back. A server
+    // that ignored the batch instead would answer it with a frame, failing the check at once
+    // rather than passing on the receive timeout.
+    const GlSwapPayload swap = {1};
+    c.Send(OP_GL_SWAP, &swap, sizeof(swap));
     ok = ok && c.SessionEnded();
     Check(ok, label);
+}
+
+// Full-screen triangle from gl_VertexID (the tests run on legacy contexts, which need no VAO).
+const char* const kFullScreenVs =
+    "#version 330\n"
+    "void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+
+// Appends the commands that create and compile shader `id` from `src`.
+void AddShader(std::vector<uint8_t>& batch, uint32_t type, uint32_t id, const char* src) {
+    const GlCreateShaderArgs create = {type, id};
+    AddCommand(batch, GLF_CreateShader, &create, sizeof(create));
+    const GlShaderSourceArgs head = {id, static_cast<uint32_t>(std::strlen(src))};
+    std::vector<uint8_t> source(sizeof(head) + head.length);
+    std::memcpy(source.data(), &head, sizeof(head));
+    std::memcpy(source.data() + sizeof(head), src, head.length);
+    AddCommand(batch, GLF_ShaderSource, source.data(), static_cast<uint32_t>(source.size()));
+    const GlIdArgs compile = {id};
+    AddCommand(batch, GLF_CompileShader, &compile, sizeof(compile));
+}
+
+// Puts decoded pixels in RGBA order whatever byte order the server sent.
+void ToRgba(std::vector<uint8_t>& pixels, uint32_t format) {
+    if (format != FRAME_FORMAT_BGRA8) return;
+    for (size_t i = 0; i + 3 < pixels.size(); i += 4) std::swap(pixels[i], pixels[i + 2]);
+}
+
+// Swaps and decodes the returned frame into top-down RGBA `pixels`.
+bool SwapAndDecode(Case& c, uint64_t frame_number, std::vector<uint8_t>& pixels) {
+    const GlSwapPayload swap = {frame_number};
+    PacketHeader h;
+    std::vector<uint8_t> p;
+    if (!c.Send(OP_GL_SWAP, &swap, sizeof(swap)) || !c.Receive(h, p) || h.opcode != OP_FRAME_DATA ||
+        p.size() < sizeof(FrameDataPayload)) {
+        return false;
+    }
+    FrameDataPayload meta;
+    std::memcpy(&meta, p.data(), sizeof(meta));
+    const size_t count = static_cast<size_t>(meta.width) * meta.height;
+    pixels.assign(count * 4, 0);
+    if (h.flags & FLAG_COMPRESSED) {
+        if (!FrameCodec::Decode(p.data() + sizeof(meta), p.size() - sizeof(meta), pixels.data(), count, false)) return false;
+    } else {
+        if (p.size() - sizeof(meta) < pixels.size()) return false;
+        std::memcpy(pixels.data(), p.data() + sizeof(meta), pixels.size());
+    }
+    ToRgba(pixels, meta.format);
+    return true;
+}
+
+// Sends a batch that clears a width x height viewport to (r, g, b).
+bool SendClear(Case& c, float r, float g, float b, int32_t width, int32_t height) {
+    std::vector<uint8_t> batch;
+    const GlViewportArgs viewport = {0, 0, width, height};
+    const GlClearColorArgs color = {r, g, b, 1.0f};
+    const GlClearArgs clear = {0x4000};
+    AddCommand(batch, GLF_Viewport, &viewport, sizeof(viewport));
+    AddCommand(batch, GLF_ClearColor, &color, sizeof(color));
+    AddCommand(batch, GLF_Clear, &clear, sizeof(clear));
+    return c.Send(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size()));
+}
+
+struct VideoFrame {
+    uint32_t codec = 0;
+    uint32_t mode = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool picture = false;
+    std::vector<uint8_t> rgba; // top-down, when `picture`
+
+    bool Near(uint32_t x, uint32_t y, int r, int g, int b) const {
+        if (!picture || x >= width || y >= height) return false;
+        const uint8_t* p = &rgba[(static_cast<size_t>(y) * width + x) * 4];
+        return std::abs(p[0] - r) <= 8 && std::abs(p[1] - g) <= 8 && std::abs(p[2] - b) <= 8;
+    }
+};
+
+// Swaps and, for a FRAME_CODEC_H264 frame, decodes its access units with `decoder`.
+bool SwapVideo(Case& c, uint64_t frame_number, Video::H264Decoder& decoder, VideoFrame& f) {
+    const GlSwapPayload swap = {frame_number};
+    PacketHeader h;
+    std::vector<uint8_t> p;
+    if (!c.Send(OP_GL_SWAP, &swap, sizeof(swap)) || !c.Receive(h, p) || h.opcode != OP_FRAME_DATA ||
+        !(h.flags & FLAG_COMPRESSED) || p.size() < sizeof(FrameDataPayload) + sizeof(CompressedFrameHeader)) {
+        return false;
+    }
+    FrameDataPayload meta;
+    CompressedFrameHeader header;
+    std::memcpy(&meta, p.data(), sizeof(meta));
+    std::memcpy(&header, p.data() + sizeof(meta), sizeof(header));
+    f = VideoFrame{header.codec, header.mode, meta.width, meta.height, false, {}};
+    if (header.codec != FRAME_CODEC_H264) return true;
+    f.rgba.assign(static_cast<size_t>(meta.width) * meta.height * 4, 0);
+    size_t pos = sizeof(meta) + sizeof(header);
+    while (pos + 4 <= p.size()) {
+        uint32_t length = 0;
+        std::memcpy(&length, &p[pos], 4);
+        pos += 4;
+        bool got = false;
+        if (length > p.size() - pos || !decoder.Decode(&p[pos], length, meta.width, meta.height, f.rgba.data(), got)) {
+            return false;
+        }
+        f.picture = f.picture || got;
+        pos += length;
+    }
+    ToRgba(f.rgba, FRAME_FORMAT_BGRA8);
+    return pos == p.size();
 }
 
 } // namespace
@@ -159,6 +278,7 @@ int main(int argc, char** argv) {
                 const bool decoded = (h.flags & FLAG_COMPRESSED)
                     ? FrameCodec::Decode(p.data() + sizeof(meta), p.size() - sizeof(meta), pixels.data(), 64 * 48, false)
                     : (std::memcpy(pixels.data(), p.data() + sizeof(meta), pixels.size()), true);
+                ToRgba(pixels, meta.format);
                 const uint8_t* mid = &pixels[(24 * 64 + 32) * 4];
                 Check(decoded && mid[0] == 0 && mid[1] == 255 && mid[2] == 0, "centre pixel is the clear colour");
             }
@@ -195,9 +315,252 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::printf("[gl_server] texture buffer object read by a shader\n");
+    {
+        // Minecraft's terrain shaders read chunk data with texelFetch(samplerBuffer): the buffer
+        // goes through GL_TEXTURE_BUFFER and is attached with glTexBuffer.
+        Case c(port++);
+        bool ok = c.Handshake() && c.CreateContext(64, 48) == 0;
+        if (ok) {
+            std::vector<uint8_t> batch;
+            const GlIdArgs gen = {1};
+            AddCommand(batch, GLF_GenBuffer, &gen, sizeof(gen));
+            const GlBindBufferArgs bind = {0x8C2A /*GL_TEXTURE_BUFFER*/, 1};
+            AddCommand(batch, GLF_BindBuffer, &bind, sizeof(bind));
+            const GlBufferDataArgs bda = {0x8C2A, 0x88E4 /*GL_STATIC_DRAW*/, 8};
+            const uint8_t texels[8] = {255, 0, 0, 255, 0, 255, 0, 255}; // texel 0 red, texel 1 green
+            std::vector<uint8_t> data(sizeof(bda) + sizeof(texels));
+            std::memcpy(data.data(), &bda, sizeof(bda));
+            std::memcpy(data.data() + sizeof(bda), texels, sizeof(texels));
+            AddCommand(batch, GLF_BufferData, data.data(), static_cast<uint32_t>(data.size()));
+
+            const uint32_t gen_tex[2] = {1, 5}; // GlGenArgs{count = 1} followed by the id
+            AddCommand(batch, GLF_GenTextures, gen_tex, sizeof(gen_tex));
+            const GlBindTextureArgs bind_tex = {0x8C2A, 5};
+            AddCommand(batch, GLF_BindTexture, &bind_tex, sizeof(bind_tex));
+            const GlTexBufferArgs tex_buffer = {0x8C2A, 0x8058 /*GL_RGBA8*/, 1};
+            AddCommand(batch, GLF_TexBuffer, &tex_buffer, sizeof(tex_buffer));
+
+            // The fragment colour is texel 1 of the buffer.
+            AddShader(batch, 0x8B31 /*GL_VERTEX_SHADER*/, 10, kFullScreenVs);
+            AddShader(batch, 0x8B30 /*GL_FRAGMENT_SHADER*/, 11,
+                      "#version 330\n"
+                      "uniform samplerBuffer tbo;\n"
+                      "out vec4 color;\n"
+                      "void main() { color = texelFetch(tbo, 1); }\n");
+            const GlIdArgs program = {20};
+            AddCommand(batch, GLF_CreateProgram, &program, sizeof(program));
+            const GlAttachShaderArgs attach_vs = {20, 10}, attach_fs = {20, 11};
+            AddCommand(batch, GLF_AttachShader, &attach_vs, sizeof(attach_vs));
+            AddCommand(batch, GLF_AttachShader, &attach_fs, sizeof(attach_fs));
+            AddCommand(batch, GLF_LinkProgram, &program, sizeof(program));
+            AddCommand(batch, GLF_UseProgram, &program, sizeof(program));
+
+            // Indexed blend toggles are forwarded too; blending ends up off for the draw.
+            const GlCapIndexArgs blend0 = {0x0BE2 /*GL_BLEND*/, 0};
+            AddCommand(batch, GLF_Enablei, &blend0, sizeof(blend0));
+            AddCommand(batch, GLF_Disablei, &blend0, sizeof(blend0));
+
+            const GlViewportArgs viewport = {0, 0, 64, 48};
+            const GlClearColorArgs black = {0.0f, 0.0f, 0.0f, 1.0f};
+            const GlClearArgs clear = {0x4000};
+            const GlDrawArraysArgs draw = {GL_TRIANGLES, 0, 3};
+            AddCommand(batch, GLF_Viewport, &viewport, sizeof(viewport));
+            AddCommand(batch, GLF_ClearColor, &black, sizeof(black));
+            AddCommand(batch, GLF_Clear, &clear, sizeof(clear));
+            AddCommand(batch, GLF_DrawArrays, &draw, sizeof(draw));
+
+            const GlSwapPayload swap = {3};
+            PacketHeader h;
+            std::vector<uint8_t> p;
+            ok = c.Send(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size())) &&
+                 c.Send(OP_GL_SWAP, &swap, sizeof(swap)) && c.Receive(h, p) && h.opcode == OP_FRAME_DATA &&
+                 p.size() >= sizeof(FrameDataPayload);
+            Check(ok, "TBO commands accepted and a frame returned");
+            if (ok) {
+                FrameDataPayload meta;
+                std::memcpy(&meta, p.data(), sizeof(meta));
+                std::vector<uint8_t> pixels(64 * 48 * 4, 0);
+                const bool decoded = (h.flags & FLAG_COMPRESSED)
+                    ? FrameCodec::Decode(p.data() + sizeof(meta), p.size() - sizeof(meta), pixels.data(), 64 * 48, false)
+                    : (std::memcpy(pixels.data(), p.data() + sizeof(meta), pixels.size()), true);
+                ToRgba(pixels, meta.format);
+                const uint8_t* mid = &pixels[(24 * 64 + 32) * 4];
+                char label[96];
+                std::snprintf(label, sizeof(label), "shader reads texel 1 of the buffer (centre %u,%u,%u)",
+                              mid[0], mid[1], mid[2]);
+                Check(decoded && mid[0] == 0 && mid[1] == 255 && mid[2] == 0, label);
+            }
+        } else {
+            Check(false, "TBO commands accepted and a frame returned");
+        }
+    }
+
+    std::printf("[gl_server] buffer larger than 64 MB keeps every upload\n");
+    {
+        // Minecraft 26.3 allocates 128 MB chunk heaps without data, then writes sections anywhere
+        // in them. A later write further in must not reallocate (and so wipe) the buffer.
+        Case c(port++);
+        bool ok = c.Handshake() && c.CreateContext(64, 48) == 0;
+        std::vector<uint8_t> batch;
+        const GlIdArgs gen = {1};
+        AddCommand(batch, GLF_GenBuffer, &gen, sizeof(gen));
+        const GlBindBufferArgs bind = {0x8C2A /*GL_TEXTURE_BUFFER*/, 1};
+        AddCommand(batch, GLF_BindBuffer, &bind, sizeof(bind));
+        const uint64_t heap = 100ull << 20, far_offset = 96ull << 20;
+        const GlBufferDataArgs alloc = {0x8C2A, 0x88E8 /*GL_DYNAMIC_DRAW*/, heap};
+        AddCommand(batch, GLF_BufferData, &alloc, sizeof(alloc));
+        auto write_texel = [&](uint64_t offset, uint8_t r, uint8_t g, uint8_t b) {
+            const GlBufferSubDataArgs w = {0x8C2A, 0, offset, 4};
+            uint8_t cmd[sizeof(w) + 4];
+            std::memcpy(cmd, &w, sizeof(w));
+            const uint8_t rgba[4] = {r, g, b, 255};
+            std::memcpy(cmd + sizeof(w), rgba, sizeof(rgba));
+            AddCommand(batch, GLF_BufferSubData, cmd, sizeof(cmd));
+        };
+        write_texel(0, 0, 255, 0);
+        write_texel(far_offset, 0, 0, 255);
+        write_texel(heap, 255, 0, 0); // past the end: skipped, the buffer is neither grown nor wiped
+
+        const uint32_t gen_tex[2] = {1, 5};
+        AddCommand(batch, GLF_GenTextures, gen_tex, sizeof(gen_tex));
+        const GlBindTextureArgs bind_tex = {0x8C2A, 5};
+        AddCommand(batch, GLF_BindTexture, &bind_tex, sizeof(bind_tex));
+        const GlTexBufferArgs tex_buffer = {0x8C2A, 0x8058 /*GL_RGBA8*/, 1};
+        AddCommand(batch, GLF_TexBuffer, &tex_buffer, sizeof(tex_buffer));
+        char fs[256];
+        std::snprintf(fs, sizeof(fs),
+                      "#version 330\nuniform samplerBuffer tbo;\nout vec4 color;\n"
+                      "void main() { color = texelFetch(tbo, gl_FragCoord.x < 32.0 ? 0 : %u); }\n",
+                      static_cast<unsigned>(far_offset / 4));
+        AddShader(batch, 0x8B31 /*GL_VERTEX_SHADER*/, 10, kFullScreenVs);
+        AddShader(batch, 0x8B30 /*GL_FRAGMENT_SHADER*/, 11, fs);
+        const GlIdArgs program = {20};
+        AddCommand(batch, GLF_CreateProgram, &program, sizeof(program));
+        const GlAttachShaderArgs attach_vs = {20, 10}, attach_fs = {20, 11};
+        AddCommand(batch, GLF_AttachShader, &attach_vs, sizeof(attach_vs));
+        AddCommand(batch, GLF_AttachShader, &attach_fs, sizeof(attach_fs));
+        AddCommand(batch, GLF_LinkProgram, &program, sizeof(program));
+        AddCommand(batch, GLF_UseProgram, &program, sizeof(program));
+        const GlViewportArgs viewport = {0, 0, 64, 48};
+        const GlDrawArraysArgs draw = {GL_TRIANGLES, 0, 3};
+        AddCommand(batch, GLF_Viewport, &viewport, sizeof(viewport));
+        AddCommand(batch, GLF_DrawArrays, &draw, sizeof(draw));
+
+        std::vector<uint8_t> pixels;
+        ok = ok && c.Send(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size())) && SwapAndDecode(c, 9, pixels);
+        const uint8_t* left = ok ? &pixels[(24 * 64 + 8) * 4] : nullptr;
+        const uint8_t* right = ok ? &pixels[(24 * 64 + 56) * 4] : nullptr;
+        char label[160];
+        std::snprintf(label, sizeof(label), "100 MB allocation accepted, first and far writes both kept (%u,%u,%u | %u,%u,%u)",
+                      left ? left[0] : 0, left ? left[1] : 0, left ? left[2] : 0,
+                      right ? right[0] : 0, right ? right[1] : 0, right ? right[2] : 0);
+        Check(ok && left[1] == 255 && left[2] == 0 && right[2] == 255 && right[1] == 0, label);
+    }
+
+    std::printf("[gl_server] client newer than the server\n");
+    {
+        // A function id this server does not know is skipped; the session and the frame survive.
+        Case c(port++);
+        bool ok = c.Handshake() && c.CreateContext(64, 48) == 0;
+        std::vector<uint8_t> batch;
+        const uint8_t opaque[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        AddCommand(batch, 9999, opaque, sizeof(opaque));
+        const GlClearColorArgs blue = {0.0f, 0.0f, 1.0f, 1.0f};
+        const GlClearArgs clear = {0x4000};
+        AddCommand(batch, GLF_ClearColor, &blue, sizeof(blue));
+        AddCommand(batch, GLF_Clear, &clear, sizeof(clear));
+        const GlSwapPayload swap = {4};
+        PacketHeader h;
+        std::vector<uint8_t> p;
+        ok = ok && c.Send(OP_GL_COMMANDS, batch.data(), static_cast<uint32_t>(batch.size())) &&
+             c.Send(OP_GL_SWAP, &swap, sizeof(swap)) && c.Receive(h, p) && h.opcode == OP_FRAME_DATA &&
+             p.size() >= sizeof(FrameDataPayload);
+        bool blue_frame = false;
+        if (ok) {
+            FrameDataPayload meta;
+            std::memcpy(&meta, p.data(), sizeof(meta));
+            std::vector<uint8_t> pixels(64 * 48 * 4, 0);
+            const bool decoded = (h.flags & FLAG_COMPRESSED)
+                ? FrameCodec::Decode(p.data() + sizeof(meta), p.size() - sizeof(meta), pixels.data(), 64 * 48, false)
+                : (std::memcpy(pixels.data(), p.data() + sizeof(meta), pixels.size()), true);
+            ToRgba(pixels, meta.format);
+            const uint8_t* mid = &pixels[(24 * 64 + 32) * 4];
+            blue_frame = decoded && mid[0] == 0 && mid[1] == 0 && mid[2] == 255;
+        }
+        Check(ok && blue_frame, "unknown function skipped, the rest of the batch still renders");
+    }
+
+    std::printf("[gl_server] H.264 video frames\n");
+    if (!Video::IsAvailable()) {
+        std::printf("  [SKIP] Media Foundation is not available on this system\n");
+    } else {
+        constexpr uint32_t kVideoFlags = CLIENT_FLAG_API_OPENGL | CLIENT_FLAG_FRAME_COMPRESSION | CLIENT_FLAG_VIDEO_H264;
+        {
+            Case c(port++);
+            bool ok = c.Handshake(kVideoFlags, 12000) && c.CreateContext(320, 240) == 0;
+            Check(ok, "video handshake and context creation");
+            Video::H264Decoder decoder;
+            Check(decoder.Create(), "H.264 decoder created");
+            VideoFrame f;
+            ok = ok && SendClear(c, 1.0f, 0.5f, 0.0f, 320, 240) && SwapVideo(c, 1, decoder, f);
+            Check(ok && f.codec == FRAME_CODEC_H264 && f.mode == FRAME_MODE_KEY, "first frame is an H.264 key frame");
+            Check(ok && f.Near(160, 120, 255, 128, 0) && f.Near(2, 2, 255, 128, 0), "orange decoded within 8 levels");
+            ok = ok && SendClear(c, 0.0f, 0.5f, 0.5f, 320, 240) && SwapVideo(c, 2, decoder, f);
+            Check(ok && f.codec == FRAME_CODEC_H264 && f.mode == FRAME_MODE_DELTA && f.Near(160, 120, 0, 128, 128),
+                  "next frame is a predicted picture in the new colour");
+            // A new size goes out losslessly until it has held for a while, then starts a new
+            // stream, which a fresh decoder reads from its first frame.
+            const GlResizePayload resize = {400, 300};
+            Video::H264Decoder resized;
+            ok = ok && resized.Create() && c.Send(OP_GL_RESIZE, &resize, sizeof(resize));
+            int lossless = 0;
+            for (uint64_t n = 3; ok && n < 60; ++n) {
+                ok = SendClear(c, 0.2f, 0.4f, 1.0f, 400, 300) && SwapVideo(c, n, resized, f);
+                if (f.codec == FRAME_CODEC_H264) break;
+                lossless += f.codec == FRAME_CODEC_RLE_DELTA ? 1 : 100;
+            }
+            Check(ok && lossless >= 20 && lossless < 40, "a new size is sent losslessly until it holds (30 frames)");
+            Check(ok && f.codec == FRAME_CODEC_H264 && f.width == 400 && f.height == 300 && f.mode == FRAME_MODE_KEY &&
+                      f.Near(399, 299, 51, 102, 255),
+                  "then it restarts the stream with a key frame");
+        }
+        {
+            Case c(port++);
+            bool ok = c.Handshake(kVideoFlags) && c.CreateContext(48, 32) == 0;
+            std::vector<uint8_t> pixels;
+            ok = ok && SendClear(c, 0.0f, 1.0f, 0.0f, 48, 32) && SwapAndDecode(c, 1, pixels);
+            Check(ok && pixels[0] == 0 && pixels[1] == 255 && pixels[2] == 0, "frames under 64 pixels stay lossless");
+        }
+    }
+
     std::printf("[gl_server] hostile input\n");
     {
         std::vector<uint8_t> b;
+
+        b.clear();
+        const GlTexBufferArgs tbo_wrong_target = {0x0DE1 /*GL_TEXTURE_2D*/, 0x8058, 0};
+        AddCommand(b, GLF_TexBuffer, &tbo_wrong_target, sizeof(tbo_wrong_target));
+        ExpectRejected(port++, "glTexBuffer on a target other than GL_TEXTURE_BUFFER", b);
+
+        b.clear();
+        const GlTexBufferArgs tbo_unknown = {0x8C2A, 0x8058, 77};
+        AddCommand(b, GLF_TexBuffer, &tbo_unknown, sizeof(tbo_unknown));
+        ExpectRejected(port++, "glTexBuffer with a buffer the client never created", b);
+
+        b.clear();
+        const GlIdArgs gen_huge = {1};
+        AddCommand(b, GLF_GenBuffer, &gen_huge, sizeof(gen_huge));
+        const GlBindBufferArgs bind_huge = {0x8892 /*GL_ARRAY_BUFFER*/, 1};
+        AddCommand(b, GLF_BindBuffer, &bind_huge, sizeof(bind_huge));
+        const GlBufferDataArgs huge = {0x8892, 0x88E8, 3ull << 30};
+        AddCommand(b, GLF_BufferData, &huge, sizeof(huge));
+        ExpectRejected(port++, "glBufferData allocation over 2 GB", b);
+
+        b.clear();
+        const GlIdArgs short_enablei = {0x0BE2};
+        AddCommand(b, GLF_Enablei, &short_enablei, sizeof(short_enablei));
+        ExpectRejected(port++, "glEnablei with a truncated argument block", b);
 
         b = {1, 0, 0};  // shorter than a command header
         ExpectRejected(port++, "truncated command header", b);
@@ -205,10 +568,6 @@ int main(int argc, char** argv) {
         b.clear();
         AddCommand(b, GLF_Clear, nullptr, 0, 0, 4096);  // declares more argument bytes than the batch holds
         ExpectRejected(port++, "command size beyond the batch", b);
-
-        b.clear();
-        AddCommand(b, 9999, nullptr, 0);
-        ExpectRejected(port++, "unknown function id", b);
 
         b.clear();
         const uint8_t two[2] = {0, 0};
@@ -374,6 +733,7 @@ int main(int argc, char** argv) {
             const bool decoded = (reply.flags & FLAG_COMPRESSED)
                 ? FrameCodec::Decode(pld.data() + sizeof(meta), pld.size() - sizeof(meta), pixels.data(), w * h, false)
                 : (std::memcpy(pixels.data(), pld.data() + sizeof(meta), pixels.size()), true);
+            ToRgba(pixels, meta.format);
             if (!decoded) return false;
 
             const uint8_t* center = &pixels[((h / 2) * w + (w / 2)) * 4];

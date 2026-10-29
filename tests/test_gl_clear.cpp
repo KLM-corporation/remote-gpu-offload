@@ -116,6 +116,11 @@ int main() {
         SetEnvironmentVariableA("RGPU_CAPTURE_FILE", capture_buf);
     }
     const char* capture_path = capture_buf;
+    // The checks read the capture right after each SwapBuffers, so every swap must wait for its
+    // own frame; the pipelined mode has its own section below.
+    SetEnvironmentVariableA("RGPU_FRAME_LATENCY", "1");
+    // Exact colours need lossless frames; H.264 video has its own section below.
+    SetEnvironmentVariableA("RGPU_VIDEO", "0");
 
     WNDCLASSA wc = {};
     wc.lpfnWndProc = WndProc;
@@ -359,6 +364,118 @@ int main() {
     DrawAndCheck(hdc, capture_path, 320, 240, dark, "frame 3 (window just resized)");
     DrawAndCheck(hdc, capture_path, 400, 300, red, "frame 4 (new size)");
 
+    // Minecraft 26.3 keeps chunk geometry in 128 MB heaps filled piece by piece with glBufferSubData.
+    // Same pattern on a 100 MB texture buffer read by a shader: the allocation alone is over 64 MB,
+    // the 20 MB upload travels in several chunks, and no upload may wipe an earlier one.
+    {
+        using TexBufferFn = void(WINAPI*)(unsigned, unsigned, unsigned);
+        using CreateShaderFn = unsigned(WINAPI*)(unsigned);
+        using ShaderSourceFn = void(WINAPI*)(unsigned, int, const char* const*, const int*);
+        using UintFn = void(WINAPI*)(unsigned);
+        using CreateProgramFn = unsigned(WINAPI*)();
+        using AttachShaderFn = void(WINAPI*)(unsigned, unsigned);
+        auto pfnTexBuffer = reinterpret_cast<TexBufferFn>(reinterpret_cast<void*>(wglGetProcAddress("glTexBuffer")));
+        auto pfnCreateShader = reinterpret_cast<CreateShaderFn>(reinterpret_cast<void*>(wglGetProcAddress("glCreateShader")));
+        auto pfnShaderSource = reinterpret_cast<ShaderSourceFn>(reinterpret_cast<void*>(wglGetProcAddress("glShaderSource")));
+        auto pfnCompileShader = reinterpret_cast<UintFn>(reinterpret_cast<void*>(wglGetProcAddress("glCompileShader")));
+        auto pfnCreateProgram = reinterpret_cast<CreateProgramFn>(reinterpret_cast<void*>(wglGetProcAddress("glCreateProgram")));
+        auto pfnAttachShader = reinterpret_cast<AttachShaderFn>(reinterpret_cast<void*>(wglGetProcAddress("glAttachShader")));
+        auto pfnLinkProgram = reinterpret_cast<UintFn>(reinterpret_cast<void*>(wglGetProcAddress("glLinkProgram")));
+        auto pfnUseProgram = reinterpret_cast<UintFn>(reinterpret_cast<void*>(wglGetProcAddress("glUseProgram")));
+        const bool have = pfnTexBuffer && pfnCreateShader && pfnShaderSource && pfnCompileShader && pfnCreateProgram &&
+                          pfnAttachShader && pfnLinkProgram && pfnUseProgram && pfnGenBuffers && pfnBindBuffer &&
+                          pfnBufferData && pfnBufferSubData;
+        Check(have, "texture buffer and shader functions available");
+        if (have) {
+            constexpr unsigned kTextureBuffer = 0x8C2A;
+            constexpr size_t kHeap = 100u << 20, kFar = 96u << 20, kFill = 40u << 20, kFillLen = 20u << 20;
+            unsigned heap = 0;
+            pfnGenBuffers(1, &heap);
+            pfnBindBuffer(kTextureBuffer, heap);
+            pfnBufferData(kTextureBuffer, kHeap, nullptr, 0x88E8 /*GL_DYNAMIC_DRAW*/);
+            const uint8_t green[4] = {0, 255, 0, 255}, blue[4] = {0, 0, 255, 255};
+            pfnBufferSubData(kTextureBuffer, 0, 4, green);
+            pfnBufferSubData(kTextureBuffer, kFar, 4, blue); // further in: used to wipe the green texel
+            std::vector<uint8_t> red_fill(kFillLen);
+            for (size_t i = 0; i < kFillLen; i += 4) { red_fill[i] = 255; red_fill[i + 1] = 0; red_fill[i + 2] = 0; red_fill[i + 3] = 255; }
+            pfnBufferSubData(kTextureBuffer, kFill, kFillLen, red_fill.data());
+
+            unsigned tex = 0;
+            glGenTextures(1, &tex);
+            glBindTexture(kTextureBuffer, tex);
+            pfnTexBuffer(kTextureBuffer, 0x8058 /*GL_RGBA8*/, heap);
+
+            // Three bands: texel 0 (green), the last texel of the chunked upload (red), the far texel (blue).
+            char fs[512];
+            std::snprintf(fs, sizeof(fs),
+                          "#version 330\n"
+                          "uniform samplerBuffer tbo;\n"
+                          "out vec4 color;\n"
+                          "void main() {\n"
+                          "  int i = gl_FragCoord.x < 133.0 ? 0 : (gl_FragCoord.x < 266.0 ? %u : %u);\n"
+                          "  color = texelFetch(tbo, i);\n"
+                          "}\n",
+                          static_cast<unsigned>((kFill + kFillLen - 4) / 4), static_cast<unsigned>(kFar / 4));
+            const char* vs = "#version 330\n"
+                             "void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+                             "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+            const char* fs_src = fs;
+            const unsigned vsh = pfnCreateShader(0x8B31 /*GL_VERTEX_SHADER*/);
+            const unsigned fsh = pfnCreateShader(0x8B30 /*GL_FRAGMENT_SHADER*/);
+            pfnShaderSource(vsh, 1, &vs, nullptr);
+            pfnShaderSource(fsh, 1, &fs_src, nullptr);
+            pfnCompileShader(vsh);
+            pfnCompileShader(fsh);
+            const unsigned prog = pfnCreateProgram();
+            pfnAttachShader(prog, vsh);
+            pfnAttachShader(prog, fsh);
+            pfnLinkProgram(prog);
+
+            std::remove(capture_path);
+            glViewport(0, 0, 400, 300);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            pfnUseProgram(prog);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            pfnUseProgram(0);
+            Check(SwapBuffers(hdc) != FALSE, "large texture buffer frame swap");
+
+            Capture heap_frame;
+            int left[3] = {}, middle[3] = {}, right[3] = {};
+            const bool read = ReadCapture(capture_path, heap_frame) && heap_frame.Pixel(60, 150, left) &&
+                              heap_frame.Pixel(200, 150, middle) && heap_frame.Pixel(340, 150, right);
+            char detail[160];
+            std::snprintf(detail, sizeof(detail), "texel 0 (%d,%d,%d), end of 20 MB upload (%d,%d,%d), texel at 96 MB (%d,%d,%d)",
+                          left[0], left[1], left[2], middle[0], middle[1], middle[2], right[0], right[1], right[2]);
+            Check(read && left[1] == 255 && left[0] == 0 && middle[0] == 255 && middle[1] == 0 &&
+                  right[2] == 255 && right[1] == 0,
+                  "100 MB buffer keeps every upload (first write, chunked write, far write)", detail);
+
+            // Minecraft maps a 256 KB ring buffer (write | unsynchronized) and fills a small part of
+            // it; only the changed bytes are sent back. Change the very last texel of such a mapping.
+            constexpr size_t kRing = 256u << 10;
+            auto* mapped = static_cast<uint8_t*>(pfnMapBufferRange(kTextureBuffer, kFar - kRing, kRing + 4, 0x22));
+            if (mapped) {
+                uint8_t* texel = mapped + kRing;
+                texel[0] = 255; texel[1] = 0; texel[2] = 255; texel[3] = 255;
+            }
+            const bool unmapped = pfnUnmapBuffer(kTextureBuffer) != 0;
+            std::remove(capture_path);
+            glClear(GL_COLOR_BUFFER_BIT);
+            pfnUseProgram(prog);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            pfnUseProgram(0);
+            Check(mapped && unmapped && SwapBuffers(hdc) != FALSE, "mapped ring buffer frame swap");
+            Capture mapped_frame;
+            const bool mapped_read = ReadCapture(capture_path, mapped_frame) && mapped_frame.Pixel(60, 150, left) &&
+                                     mapped_frame.Pixel(340, 150, right);
+            std::snprintf(detail, sizeof(detail), "texel 0 (%d,%d,%d), mapped texel (%d,%d,%d)",
+                          left[0], left[1], left[2], right[0], right[1], right[2]);
+            Check(mapped_read && left[1] == 255 && right[0] == 255 && right[1] == 0 && right[2] == 255,
+                  "a write at the end of a 256 KB mapping reaches the server", detail);
+        }
+    }
+
     // Render foreground geometry onto the 400x300 frame for automated pixel verification.
     std::remove(capture_path);
     glViewport(0, 0, 400, 300);
@@ -375,6 +492,111 @@ int main() {
     wglDeleteContext(rc);
     ReleaseDC(hwnd, hdc);
     DestroyWindow(hwnd);
+
+    std::printf("[gl_clear] pipelined frames (RGPU_FRAME_LATENCY=2)\n");
+    {
+        SetEnvironmentVariableA("RGPU_FRAME_LATENCY", "2");
+        HWND hwnd_p = CreateWindowA("RgpuGlClearTest", "RGPU GL pipelined", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+                                    nullptr, nullptr, wc.hInstance, nullptr);
+        place(hwnd_p, 200, 150);
+        ShowWindow(hwnd_p, SW_SHOWNOACTIVATE);
+        Pump();
+        HDC hdc_p = GetDC(hwnd_p);
+        const int fmt_p = ChoosePixelFormat(hdc_p, &pfd);
+        SetPixelFormat(hdc_p, fmt_p, &pfd);
+        HGLRC rc_p = wglCreateContext(hdc_p);
+        bool ok = rc_p && wglMakeCurrent(hdc_p, rc_p);
+
+        // Swaps no longer wait for their own frame: 20 frames in alternating colours...
+        for (int i = 0; i < 20 && ok; ++i) {
+            glViewport(0, 0, 200, 150);
+            glClearColor(i % 2 ? 1.0f : 0.0f, 0.0f, i % 2 ? 0.0f : 1.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ok = SwapBuffers(hdc_p) != FALSE;
+        }
+        // ...then two in one colour: by the second swap, at most one frame is still in flight, so
+        // the newest frame shown is one of the two.
+        for (int i = 0; i < 2 && ok; ++i) {
+            if (i == 1) std::remove(capture_path);
+            glClearColor(1.0f, 1.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ok = SwapBuffers(hdc_p) != FALSE;
+        }
+        Capture cap;
+        int rgb[3] = {};
+        const bool shown = ok && ReadCapture(capture_path, cap) && cap.Pixel(100, 75, rgb);
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "centre (%d,%d,%d), expected (255,255,0)", rgb[0], rgb[1], rgb[2]);
+        Check(shown && rgb[0] == 255 && rgb[1] == 255 && rgb[2] == 0, "22 pipelined frames, the newest one shown", detail);
+
+        wglMakeCurrent(nullptr, nullptr);
+        if (rc_p) wglDeleteContext(rc_p);
+        ReleaseDC(hwnd_p, hdc_p);
+        DestroyWindow(hwnd_p);
+        SetEnvironmentVariableA("RGPU_FRAME_LATENCY", "1");
+    }
+
+    std::printf("[gl_clear] H.264 video frames (RGPU_VIDEO=1)\n");
+    {
+        SetEnvironmentVariableA("RGPU_VIDEO", "1");
+        HWND hwnd_v = CreateWindowA("RgpuGlClearTest", "RGPU GL video", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+                                    nullptr, nullptr, wc.hInstance, nullptr);
+        place(hwnd_v, 640, 360);
+        ShowWindow(hwnd_v, SW_SHOWNOACTIVATE);
+        Pump();
+        HDC hdc_v = GetDC(hwnd_v);
+        const int fmt_v = ChoosePixelFormat(hdc_v, &pfd);
+        SetPixelFormat(hdc_v, fmt_v, &pfd);
+        HGLRC rc_v = wglCreateContext(hdc_v);
+        bool ok = rc_v && wglMakeCurrent(hdc_v, rc_v);
+        Check(ok, "video session connects");
+
+        // A moving triangle (like a turning camera)...
+        for (int i = 0; i < 30 && ok; ++i) {
+            glViewport(0, 0, 640, 360);
+            glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            const float s = i * 0.04f;
+            glBegin(GL_TRIANGLES);
+            glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-0.8f + s, -0.6f);
+            glColor3f(0.0f, 1.0f, 0.0f); glVertex2f(0.2f + s, -0.6f);
+            glColor3f(0.0f, 0.0f, 1.0f); glVertex2f(-0.3f + s, 0.6f);
+            glEnd();
+            ok = SwapBuffers(hdc_v) != FALSE;
+        }
+        Check(ok, "30 moving frames swapped");
+
+        // ...then a still frame, orange on the left and teal on the right, whose colours must come
+        // back within the codec's loss.
+        std::remove(capture_path);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, 320, 360);
+        glClearColor(1.0f, 0.5f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(320, 0, 320, 360);
+        glClearColor(0.0f, 0.5f, 0.5f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+        ok = ok && SwapBuffers(hdc_v) != FALSE;
+        Capture cap;
+        const bool read = ok && ReadCapture(capture_path, cap);
+        Check(read && cap.width == 640 && cap.height == 360, "video frame captured at 640x360");
+        int left[3] = {}, right[3] = {};
+        const bool sampled = read && cap.Pixel(160, 180, left) && cap.Pixel(480, 180, right);
+        auto close = [](const int got[3], int r, int g, int b) {
+            return std::abs(got[0] - r) <= 8 && std::abs(got[1] - g) <= 8 && std::abs(got[2] - b) <= 8;
+        };
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "left (%d,%d,%d) vs (255,128,0), right (%d,%d,%d) vs (0,128,128)", left[0],
+                      left[1], left[2], right[0], right[1], right[2]);
+        Check(sampled && close(left, 255, 128, 0) && close(right, 0, 128, 128), "video colours within 8 levels", detail);
+
+        wglMakeCurrent(nullptr, nullptr);
+        if (rc_v) wglDeleteContext(rc_v);
+        ReleaseDC(hwnd_v, hdc_v);
+        DestroyWindow(hwnd_v);
+        SetEnvironmentVariableA("RGPU_VIDEO", "0");
+    }
 
     std::printf("[gl_clear] concurrent sessions test\n");
     {
