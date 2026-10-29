@@ -38,23 +38,21 @@ std::ofstream g_logFile;
 std::mutex g_logMutex;
 
 void Log(const char* fmt, ...) {
-    static int s_verbose = -1;
-    if (s_verbose == -1) {
-        char env[16] = {};
-        if (GetEnvironmentVariableA("RGPU_GL_VERBOSE", env, sizeof(env)) > 0) {
-            s_verbose = (env[0] == '1') ? 1 : 0;
-        } else {
-            s_verbose = 0;
-        }
-    }
-    if (!s_verbose) {
-        if (std::strncmp(fmt, "[WGL", 4) != 0 &&
-            std::strncmp(fmt, "[RemoteGPU", 10) != 0 &&
-            std::strncmp(fmt, "[DllMain", 8) != 0 &&
-            std::strncmp(fmt, "[ERROR", 6) != 0 &&
-            std::strncmp(fmt, "[wglGetProcAddress -> REGISTER_STUB", 35) != 0) {
+    static std::map<const char*, int> s_callCounts;
+    static int s_totalLogged = 0;
+
+    bool isSpecial = (std::strncmp(fmt, "[WGL", 4) == 0 ||
+                      std::strncmp(fmt, "[RemoteGPU", 10) == 0 ||
+                      std::strncmp(fmt, "[DllMain", 8) == 0 ||
+                      std::strncmp(fmt, "[ERROR", 6) == 0 ||
+                      std::strncmp(fmt, "[wglGetProcAddress -> REGISTER_STUB", 35) == 0);
+
+    if (!isSpecial) {
+        int count = ++s_callCounts[fmt];
+        if (count > 10 || s_totalLogged > 5000) {
             return;
         }
+        ++s_totalLogged;
     }
 
     std::lock_guard<std::mutex> lock(g_logMutex);
@@ -402,6 +400,13 @@ struct ClientBuffer {
 static std::map<unsigned, ClientBuffer> g_clientBuffers;
 static std::map<unsigned, unsigned> g_currentBoundBuffers;
 static std::mutex g_bufferMutex;
+static unsigned g_currentDrawFramebuffer = 0;
+static unsigned g_currentReadFramebuffer = 0;
+static unsigned g_currentRenderbuffer = 0;
+static unsigned g_currentProgram = 0;
+static unsigned g_currentVao = 0;
+static unsigned g_currentActiveTexture = 0x84C0; // GL_TEXTURE0
+static std::map<unsigned, bool> g_enabledCaps;
 
 void WINAPI glGetIntegerv(unsigned pname, int* params) {
     if (!params) return;
@@ -457,6 +462,24 @@ void WINAPI glGetIntegerv(unsigned pname, int* params) {
             *params = g_currentBoundBuffers[0x8F3F];
             break;
         }
+        case 0x8CA6: // GL_DRAW_FRAMEBUFFER_BINDING / GL_FRAMEBUFFER_BINDING
+            *params = g_currentDrawFramebuffer;
+            break;
+        case 0x8CAA: // GL_READ_FRAMEBUFFER_BINDING
+            *params = g_currentReadFramebuffer;
+            break;
+        case 0x8CA7: // GL_RENDERBUFFER_BINDING
+            *params = g_currentRenderbuffer;
+            break;
+        case 0x8B8D: // GL_CURRENT_PROGRAM
+            *params = g_currentProgram;
+            break;
+        case 0x85B5: // GL_VERTEX_ARRAY_BINDING
+            *params = g_currentVao;
+            break;
+        case 0x84E0: // GL_ACTIVE_TEXTURE
+            *params = g_currentActiveTexture;
+            break;
         case 0x0BA2: // GL_VIEWPORT
             params[0] = 0; params[1] = 0;
             params[2] = t_current ? t_current->session.Width() : kFallbackWidth;
@@ -622,6 +645,14 @@ void WINAPI glGetUniformfv(unsigned, int, float* params) {
 
 void WINAPI glBindFramebuffer(unsigned target, unsigned framebuffer) {
     Log("[GL] glBindFramebuffer(0x%X, %u)", target, framebuffer);
+    if (target == 0x8D40 /*GL_FRAMEBUFFER*/) {
+        g_currentDrawFramebuffer = framebuffer;
+        g_currentReadFramebuffer = framebuffer;
+    } else if (target == 0x8CA9 /*GL_DRAW_FRAMEBUFFER*/) {
+        g_currentDrawFramebuffer = framebuffer;
+    } else if (target == 0x8CA8 /*GL_READ_FRAMEBUFFER*/) {
+        g_currentReadFramebuffer = framebuffer;
+    }
     if (t_current) {
         GlBindFramebufferArgs args = {target, framebuffer};
         t_current->session.Append(GLF_BindFramebuffer, &args, sizeof(args));
@@ -630,6 +661,7 @@ void WINAPI glBindFramebuffer(unsigned target, unsigned framebuffer) {
 
 void WINAPI glBindRenderbuffer(unsigned target, unsigned renderbuffer) {
     Log("[GL] glBindRenderbuffer(0x%X, %u)", target, renderbuffer);
+    g_currentRenderbuffer = renderbuffer;
     if (t_current) {
         GlBindRenderbufferArgs args = {target, renderbuffer};
         t_current->session.Append(GLF_BindRenderbuffer, &args, sizeof(args));
@@ -652,9 +684,17 @@ void WINAPI glFramebufferRenderbuffer(unsigned target, unsigned attachment, unsi
 }
 void WINAPI glFramebufferTextureLayer(unsigned target, unsigned attachment, unsigned texture, int level, int layer) {
     Log("[GL] glFramebufferTextureLayer(0x%X, 0x%X, %u, %d, %d)", target, attachment, texture, level, layer);
+    if (t_current) {
+        GlFramebufferTextureLayerArgs args = {target, attachment, texture, level, layer};
+        t_current->session.Append(GLF_FramebufferTextureLayer, &args, sizeof(args));
+    }
 }
 void WINAPI glFramebufferTexture(unsigned target, unsigned attachment, unsigned texture, int level) {
     Log("[GL] glFramebufferTexture(0x%X, 0x%X, %u, %d)", target, attachment, texture, level);
+    if (t_current) {
+        GlFramebufferTextureArgs args = {target, attachment, texture, level};
+        t_current->session.Append(GLF_FramebufferTexture, &args, sizeof(args));
+    }
 }
 void WINAPI glFramebufferTexture1D(unsigned target, unsigned attachment, unsigned textarget, unsigned texture, int level) {
     Log("[GL] glFramebufferTexture1D(0x%X, 0x%X, 0x%X, %u, %d)", target, attachment, textarget, texture, level);
@@ -800,6 +840,7 @@ void WINAPI glGetShaderSource(unsigned, int maxLength, int* length, char* source
 
 void WINAPI glEnable(unsigned cap) {
     Log("[GL] glEnable(0x%X)", cap);
+    g_enabledCaps[cap] = true;
     if (t_current) {
         GlIdArgs args = {cap};
         t_current->session.Append(GLF_Enable, &args, sizeof(args));
@@ -807,12 +848,16 @@ void WINAPI glEnable(unsigned cap) {
 }
 void WINAPI glDisable(unsigned cap) {
     Log("[GL] glDisable(0x%X)", cap);
+    g_enabledCaps[cap] = false;
     if (t_current) {
         GlIdArgs args = {cap};
         t_current->session.Append(GLF_Disable, &args, sizeof(args));
     }
 }
-unsigned char WINAPI glIsEnabled(unsigned) { return 1; }
+unsigned char WINAPI glIsEnabled(unsigned cap) {
+    auto it = g_enabledCaps.find(cap);
+    return (it != g_enabledCaps.end() && it->second) ? 1 : 0;
+}
 
 inline size_t GetPixelSize(unsigned format, unsigned type) {
     size_t comp_size = 1;
@@ -1139,6 +1184,7 @@ void WINAPI glGetTexParameterIuiv(unsigned, unsigned, unsigned* params) {
 
 void WINAPI glActiveTexture(unsigned texture) {
     Log("[GL] glActiveTexture(0x%X)", texture);
+    g_currentActiveTexture = texture;
     if (t_current) {
         GlIdArgs args = {texture};
         t_current->session.Append(GLF_ActiveTexture, &args, sizeof(args));
@@ -1164,6 +1210,7 @@ void WINAPI glGenVertexArrays(int count, unsigned* arrays) {
 
 void WINAPI glBindVertexArray(unsigned array) {
     Log("[GL] glBindVertexArray(%u)", array);
+    g_currentVao = array;
     if (t_current) {
         GlIdArgs args = {array};
         t_current->session.Append(GLF_BindVertexArray, &args, sizeof(args));
@@ -1848,6 +1895,10 @@ static void SendBufferRange(unsigned target, unsigned id, size_t off, size_t len
         std::memcpy(payload.data(), &args, sizeof(args));
         std::memcpy(payload.data() + sizeof(args), it->second.storage.data() + off, len);
     }
+    if (id != 0) {
+        const GlBindBufferArgs bindArgs = {target, id};
+        t_current->session.Append(GLF_BindBuffer, &bindArgs, sizeof(bindArgs));
+    }
     t_current->session.Append(GLF_BufferSubData, payload.data(), static_cast<uint32_t>(payload.size()));
 }
 
@@ -2009,6 +2060,8 @@ void WINAPI glLinkProgram(unsigned program) {
 }
 
 void WINAPI glUseProgram(unsigned program) {
+    Log("[GL] glUseProgram(%u)", program);
+    g_currentProgram = program;
     if (!t_current) return;
     const GlIdArgs args = {program};
     t_current->session.Append(GLF_UseProgram, &args, sizeof(args));
@@ -2442,24 +2495,26 @@ void WINAPI glCreateBuffers(int n, unsigned* buffers) {
 
 void WINAPI glNamedBufferData(unsigned buffer, ptrdiff_t size, const void* data, unsigned usage) {
     Log("[GL] glNamedBufferData(buf: %u, size: %td, usage: 0x%X)", buffer, size, usage);
-    std::lock_guard<std::mutex> lock(g_bufferMutex);
-    auto& buf = g_clientBuffers[buffer];
-    buf.storage.resize(size > 0 ? static_cast<size_t>(size) : 0);
-    if (data && size > 0) {
-        std::memcpy(buf.storage.data(), data, static_cast<size_t>(size));
+    unsigned old = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        old = g_currentBoundBuffers[0x8F37 /*GL_COPY_WRITE_BUFFER*/];
     }
+    glBindBuffer(0x8F37, buffer);
+    glBufferData(0x8F37, size, data, usage);
+    glBindBuffer(0x8F37, old);
 }
 
 void WINAPI glNamedBufferSubData(unsigned buffer, ptrdiff_t offset, ptrdiff_t size, const void* data) {
     Log("[GL] glNamedBufferSubData(buf: %u, off: %td, size: %td)", buffer, offset, size);
-    std::lock_guard<std::mutex> lock(g_bufferMutex);
-    auto& buf = g_clientBuffers[buffer];
-    if (offset >= 0 && size > 0 && data) {
-        if (buf.storage.size() < static_cast<size_t>(offset + size)) {
-            buf.storage.resize(static_cast<size_t>(offset + size));
-        }
-        std::memcpy(buf.storage.data() + offset, data, static_cast<size_t>(size));
+    unsigned old = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        old = g_currentBoundBuffers[0x8F37 /*GL_COPY_WRITE_BUFFER*/];
     }
+    glBindBuffer(0x8F37, buffer);
+    glBufferSubData(0x8F37, offset, size, data);
+    glBindBuffer(0x8F37, old);
 }
 
 void WINAPI glNamedBufferStorage(unsigned buffer, ptrdiff_t size, const void* data, unsigned flags) {
@@ -2471,55 +2526,55 @@ void WINAPI glCopyNamedBufferSubData(unsigned readBuffer, unsigned writeBuffer,
                                     ptrdiff_t readOffset, ptrdiff_t writeOffset, ptrdiff_t size) {
     Log("[GL] glCopyNamedBufferSubData(%u->%u, %td->%td, size: %td)",
         readBuffer, writeBuffer, readOffset, writeOffset, size);
-    if (size <= 0 || readOffset < 0 || writeOffset < 0) return;
-    std::lock_guard<std::mutex> lock(g_bufferMutex);
-    auto itRead = g_clientBuffers.find(readBuffer);
-    auto itWrite = g_clientBuffers.find(writeBuffer);
-    if (itRead != g_clientBuffers.end() && itWrite != g_clientBuffers.end()) {
-        if (itRead->second.storage.size() >= static_cast<size_t>(readOffset + size)) {
-            if (itWrite->second.storage.size() < static_cast<size_t>(writeOffset + size)) {
-                itWrite->second.storage.resize(static_cast<size_t>(writeOffset + size));
-            }
-            std::memcpy(itWrite->second.storage.data() + writeOffset,
-                        itRead->second.storage.data() + readOffset,
-                        static_cast<size_t>(size));
-        }
+    unsigned oldRead = 0, oldWrite = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        oldRead = g_currentBoundBuffers[0x8F36 /*GL_COPY_READ_BUFFER*/];
+        oldWrite = g_currentBoundBuffers[0x8F37 /*GL_COPY_WRITE_BUFFER*/];
     }
+    glBindBuffer(0x8F36, readBuffer);
+    glBindBuffer(0x8F37, writeBuffer);
+    glCopyBufferSubData(0x8F36, 0x8F37, readOffset, writeOffset, size);
+    glBindBuffer(0x8F36, oldRead);
+    glBindBuffer(0x8F37, oldWrite);
 }
 
 void* WINAPI glMapNamedBufferRange(unsigned buffer, ptrdiff_t offset, ptrdiff_t length, unsigned access) {
     Log("[GL] glMapNamedBufferRange(buf: %u, off: %td, len: %td, access: 0x%X)", buffer, offset, length, access);
-    std::lock_guard<std::mutex> lock(g_bufferMutex);
-    auto& buf = g_clientBuffers[buffer];
-    if (offset < 0 || length < 0) return nullptr;
-    if (buf.storage.size() < static_cast<size_t>(offset + length)) {
-        buf.storage.resize(static_cast<size_t>(offset + length));
+    unsigned old = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        old = g_currentBoundBuffers[0x8F37 /*GL_COPY_WRITE_BUFFER*/];
     }
-    return buf.storage.data() + offset;
+    glBindBuffer(0x8F37, buffer);
+    void* ptr = glMapBufferRange(0x8F37, offset, length, access);
+    glBindBuffer(0x8F37, old);
+    return ptr;
 }
 
 unsigned char WINAPI glUnmapNamedBuffer(unsigned buffer) {
     Log("[GL] glUnmapNamedBuffer(buf: %u)", buffer);
-    std::vector<uint8_t> fullBufferCopy;
+    unsigned old = 0;
     {
         std::lock_guard<std::mutex> lock(g_bufferMutex);
-        auto it = g_clientBuffers.find(buffer);
-        if (it != g_clientBuffers.end()) {
-            fullBufferCopy = it->second.storage;
-        }
+        old = g_currentBoundBuffers[0x8F37 /*GL_COPY_WRITE_BUFFER*/];
     }
-    if (!fullBufferCopy.empty() && t_current && fullBufferCopy.size() <= 64 * 1024 * 1024) {
-        const GlBufferDataArgs args = {0x8892 /*GL_ARRAY_BUFFER*/, 0x88E4 /*GL_STATIC_DRAW*/, static_cast<uint64_t>(fullBufferCopy.size())};
-        std::vector<uint8_t> payload(sizeof(args) + fullBufferCopy.size());
-        std::memcpy(payload.data(), &args, sizeof(args));
-        std::memcpy(payload.data() + sizeof(args), fullBufferCopy.data(), fullBufferCopy.size());
-        t_current->session.Append(GLF_BufferData, payload.data(), static_cast<uint32_t>(payload.size()));
-    }
-    return 1;
+    glBindBuffer(0x8F37, buffer);
+    unsigned char res = glUnmapBuffer(0x8F37);
+    glBindBuffer(0x8F37, old);
+    return res;
 }
 
 void WINAPI glFlushMappedNamedBufferRange(unsigned buffer, ptrdiff_t offset, ptrdiff_t length) {
     Log("[GL] glFlushMappedNamedBufferRange(buf: %u, off: %td, len: %td)", buffer, offset, length);
+    unsigned old = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferMutex);
+        old = g_currentBoundBuffers[0x8F37 /*GL_COPY_WRITE_BUFFER*/];
+    }
+    glBindBuffer(0x8F37, buffer);
+    glFlushMappedBufferRange(0x8F37, offset, length);
+    glBindBuffer(0x8F37, old);
 }
 
 void WINAPI glCreateFramebuffers(int n, unsigned* framebuffers) {
@@ -2529,6 +2584,10 @@ void WINAPI glCreateFramebuffers(int n, unsigned* framebuffers) {
 
 void WINAPI glNamedFramebufferTexture(unsigned framebuffer, unsigned attachment, unsigned texture, int level) {
     Log("[GL] glNamedFramebufferTexture(fb: %u, attach: 0x%X, tex: %u, lvl: %d)", framebuffer, attachment, texture, level);
+    unsigned old = g_currentDrawFramebuffer;
+    glBindFramebuffer(0x8D40 /*GL_FRAMEBUFFER*/, framebuffer);
+    glFramebufferTexture2D(0x8D40, attachment, 0x0DE1 /*GL_TEXTURE_2D*/, texture, level);
+    glBindFramebuffer(0x8D40, old);
 }
 
 void WINAPI glBlitNamedFramebuffer(unsigned readFramebuffer, unsigned drawFramebuffer,
@@ -2536,6 +2595,13 @@ void WINAPI glBlitNamedFramebuffer(unsigned readFramebuffer, unsigned drawFrameb
                                    int dstX0, int dstY0, int dstX1, int dstY1,
                                    unsigned mask, unsigned filter) {
     Log("[GL] glBlitNamedFramebuffer(%u->%u, mask: 0x%X)", readFramebuffer, drawFramebuffer, mask);
+    unsigned oldRead = g_currentReadFramebuffer;
+    unsigned oldDraw = g_currentDrawFramebuffer;
+    glBindFramebuffer(0x8CA8 /*GL_READ_FRAMEBUFFER*/, readFramebuffer);
+    glBindFramebuffer(0x8CA9 /*GL_DRAW_FRAMEBUFFER*/, drawFramebuffer);
+    glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+    glBindFramebuffer(0x8CA8, oldRead);
+    glBindFramebuffer(0x8CA9, oldDraw);
 }
 
 // --- Dispatch Table for wglGetProcAddress -------------------------------------------------------

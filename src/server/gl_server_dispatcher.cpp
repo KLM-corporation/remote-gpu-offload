@@ -42,6 +42,8 @@ using GenFramebuffersFn = void(WINAPI*)(GLsizei, GLuint*);
 using BindFramebufferFn = void(WINAPI*)(GLenum, GLuint);
 using DeleteFramebuffersFn = void(WINAPI*)(GLsizei, const GLuint*);
 using FramebufferTexture2DFn = void(WINAPI*)(GLenum, GLenum, GLenum, GLuint, GLint);
+using FramebufferTextureLayerFn = void(WINAPI*)(GLenum, GLenum, GLuint, GLint, GLint);
+using FramebufferTextureFn = void(WINAPI*)(GLenum, GLenum, GLuint, GLint);
 using BlitFramebufferFn = void(WINAPI*)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 using DrawBuffersFn = void(WINAPI*)(GLsizei, const GLenum*);
 
@@ -142,6 +144,8 @@ struct GlDispatchApi {
     BindFramebufferFn bindFramebuffer = nullptr;
     DeleteFramebuffersFn deleteFramebuffers = nullptr;
     FramebufferTexture2DFn framebufferTexture2D = nullptr;
+    FramebufferTextureLayerFn framebufferTextureLayer = nullptr;
+    FramebufferTextureFn framebufferTexture = nullptr;
     BlitFramebufferFn blitFramebuffer = nullptr;
     DrawBuffersFn drawBuffers = nullptr;
 
@@ -247,6 +251,8 @@ bool GlServerDispatcher::LoadGlApi() {
     LoadGl(m_gl->bindFramebuffer, "glBindFramebuffer");
     LoadGl(m_gl->deleteFramebuffers, "glDeleteFramebuffers");
     LoadGl(m_gl->framebufferTexture2D, "glFramebufferTexture2D");
+    LoadGl(m_gl->framebufferTextureLayer, "glFramebufferTextureLayer");
+    LoadGl(m_gl->framebufferTexture, "glFramebufferTexture");
     LoadGl(m_gl->blitFramebuffer, "glBlitFramebuffer");
     LoadGl(m_gl->drawBuffers, "glDrawBuffers");
 
@@ -785,9 +791,31 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 if (cmd.size != sizeof(GlBlitFramebufferArgs)) return false;
                 const auto a = ReadArgs<GlBlitFramebufferArgs>(args);
                 if (m_gl->blitFramebuffer) {
-                    m_gl->blitFramebuffer(a.srcX0, a.srcY0, a.srcX1, a.srcY1,
-                                          a.dstX0, a.dstY0, a.dstX1, a.dstY1,
-                                          a.mask, a.filter);
+                    if (m_drawFboDefault) {
+                        GLint scissorEnabled = 0;
+                        glGetIntegerv(0x0C11 /*GL_SCISSOR_TEST*/, &scissorEnabled);
+                        if (scissorEnabled) glDisable(0x0C11);
+
+                        // Blit color component first
+                        if (a.mask & 0x4000 /*GL_COLOR_BUFFER_BIT*/) {
+                            m_gl->blitFramebuffer(a.srcX0, a.srcY0, a.srcX1, a.srcY1,
+                                                  a.dstX0, a.dstY0, a.dstX1, a.dstY1,
+                                                  0x4000, a.filter);
+                        }
+                        // Try depth/stencil if requested; drain error so format mismatch never drops color
+                        if (a.mask & ~0x4000) {
+                            m_gl->blitFramebuffer(a.srcX0, a.srcY0, a.srcX1, a.srcY1,
+                                                  a.dstX0, a.dstY0, a.dstX1, a.dstY1,
+                                                  a.mask & ~0x4000, 0x2600 /*GL_NEAREST*/);
+                            glGetError();
+                        }
+
+                        if (scissorEnabled) glEnable(0x0C11);
+                    } else {
+                        m_gl->blitFramebuffer(a.srcX0, a.srcY0, a.srcX1, a.srcY1,
+                                              a.dstX0, a.dstY0, a.dstX1, a.dstY1,
+                                              a.mask, a.filter);
+                    }
                 }
                 break;
             }
@@ -884,6 +912,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                     auto it = m_buffers.find(a.buffer);
                     if (it != m_buffers.end()) buf = it->second.gl_id;
                 }
+                m_boundBuffers[a.target] = a.buffer;
                 if (m_gl->bindBufferRange) {
                     m_gl->bindBufferRange(a.target, a.index, buf,
                                           static_cast<GLintptr>(a.offset),
@@ -899,6 +928,7 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                     auto it = m_buffers.find(a.buffer);
                     if (it != m_buffers.end()) buf = it->second.gl_id;
                 }
+                m_boundBuffers[a.target] = a.buffer;
                 if (m_gl->bindBufferBase) m_gl->bindBufferBase(a.target, a.index, buf);
                 break;
             }
@@ -1261,6 +1291,32 @@ bool GlServerDispatcher::ExecuteCommands(const uint8_t* data, size_t size) {
                 } else {
                     glDrawElements(a.mode, a.count, a.type,
                                    reinterpret_cast<const void*>(static_cast<uintptr_t>(a.indices)));
+                }
+                break;
+            }
+            case GLF_FramebufferTextureLayer: {
+                if (cmd.size != sizeof(GlFramebufferTextureLayerArgs)) return false;
+                const auto a = ReadArgs<GlFramebufferTextureLayerArgs>(args);
+                GLuint tex = 0;
+                if (a.texture != 0) {
+                    auto it = m_textures.find(a.texture);
+                    if (it != m_textures.end()) tex = it->second;
+                }
+                if (m_gl->framebufferTextureLayer) {
+                    m_gl->framebufferTextureLayer(a.target, a.attachment, tex, a.level, a.layer);
+                }
+                break;
+            }
+            case GLF_FramebufferTexture: {
+                if (cmd.size != sizeof(GlFramebufferTextureArgs)) return false;
+                const auto a = ReadArgs<GlFramebufferTextureArgs>(args);
+                GLuint tex = 0;
+                if (a.texture != 0) {
+                    auto it = m_textures.find(a.texture);
+                    if (it != m_textures.end()) tex = it->second;
+                }
+                if (m_gl->framebufferTexture) {
+                    m_gl->framebufferTexture(a.target, a.attachment, tex, a.level);
                 }
                 break;
             }

@@ -117,7 +117,9 @@ enum GlFunc : uint16_t {
     GLF_MultiDrawArraysIndirect = 84,// GlMultiDrawArraysIndirectArgs
     GLF_MultiDrawElementsIndirect = 85, // GlMultiDrawElementsIndirectArgs
     GLF_DrawArraysInstancedBaseInstance = 86, // GlDrawArraysInstancedBaseInstanceArgs
-    GLF_DrawElementsInstancedBaseVertexBaseInstance = 87 // GlDrawElementsInstancedBaseVertexBaseInstanceArgs
+    GLF_DrawElementsInstancedBaseVertexBaseInstance = 87, // GlDrawElementsInstancedBaseVertexBaseInstanceArgs
+    GLF_FramebufferTextureLayer = 88, // GlFramebufferTextureLayerArgs
+    GLF_FramebufferTexture = 89       // GlFramebufferTextureArgs
 };
 
 #pragma pack(push, 1)
@@ -201,6 +203,8 @@ struct GlSamplerParameteriArgs { uint32_t sampler, pname; int32_t param; };
 
 struct GlBindFramebufferArgs { uint32_t target, id; };
 struct GlFramebufferTexture2DArgs { uint32_t target, attachment, textarget, texture; int32_t level; };
+struct GlFramebufferTextureLayerArgs { uint32_t target, attachment, texture; int32_t level, layer; };
+struct GlFramebufferTextureArgs { uint32_t target, attachment, texture; int32_t level; };
 struct GlBlitFramebufferArgs {
     int32_t  srcX0, srcY0, srcX1, srcY1;
     int32_t  dstX0, dstY0, dstX1, dstY1;
@@ -383,6 +387,8 @@ static_assert(sizeof(GlBindSamplerArgs) == 8);
 static_assert(sizeof(GlSamplerParameteriArgs) == 12);
 static_assert(sizeof(GlBindFramebufferArgs) == 8);
 static_assert(sizeof(GlFramebufferTexture2DArgs) == 20);
+static_assert(sizeof(GlFramebufferTextureLayerArgs) == 20);
+static_assert(sizeof(GlFramebufferTextureArgs) == 16);
 static_assert(sizeof(GlBlitFramebufferArgs) == 40);
 static_assert(sizeof(GlDrawBuffersArgs) == 4);
 static_assert(sizeof(GlVertexAttribPointerArgs) == 28);
